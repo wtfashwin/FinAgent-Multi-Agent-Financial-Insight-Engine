@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
 from pathlib import Path
+from langchain_core.documents import Document
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -200,6 +201,40 @@ class DataAgent:
             stats['fraud_rate'] = float(df[fraud_col].mean())
         
         return stats
+    
+    def to_langchain_documents(self, df:pd.DataFrame,content_cols: List[str] = None) -> List[Document]:
+        """
+        Convert processed DataFrame into LangChain Documents
+        Args:
+            df(pd.DataFrame): DataFrame processed by Risk Agent
+            content_cols(List[str]): Columns to include in the main document content. 
+
+        Returns:
+            List[Document]: List of LangChain Document objects
+        """
+        if content_cols is None:
+            content_cols = [col for col in df.columns if col not in ['V1', 'V2', 'V3', 'is_anomaly', 'fraud_probability']]
+        documents = []
+        for idx, row in df.iterrows():
+            content = f"Transaction ID: {idx}\n"
+            content += "".join([f"{col}: {row[col]}\n" for col in content_cols if col in row])
+
+            metadata = {
+                "transaction_index": int(idx),
+                "is_anomaly": bool(row.get('is_anomaly', False)),
+                "risk_score": float(row.get('fraud_probability', 0.0)),
+                "source_file": "transactions.csv"
+            } 
+            documents.append(Document(page_content=content, metadata=metadata))
+        
+        logger.info(f"Converted {len(documents)} records to LangChain Documents")
+        return documents
+
+    def run(self, file_name:str) -> pd.DataFrame:
+        """ Executes Data Agent's workflow end-to-end """
+        df = self.ingest_data(file_name)
+        df = self.clean_data(df)
+        return df
     
     def save_processed_data(self, output_path: str):
         """Save processed data to CSV"""
