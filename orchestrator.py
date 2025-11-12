@@ -28,6 +28,8 @@ class AgentState(TypedDict):
     insights: Dict
     risk_assessment: Dict
     fraud_predictions: pd.DataFrame
+    rag_documents: List
+    rag_ingested: bool
     summary: str
     error: str
     messages: Annotated[List[str], operator.add]
@@ -56,18 +58,18 @@ class FinAgentOrchestrator:
         
         # Add nodes (agents)
         workflow.add_node("data_processing", self._data_processing_node)
-        workflow.add_node("insight_generation", self._insight_generation_node)
         workflow.add_node("risk_assessment", self._risk_assessment_node)
+        workflow.add_node("ingest_rag_data", self._ingest_rag_data_node)
+        workflow.add_node("insight_generation", self._insight_generation_node)
         workflow.add_node("summarization", self._summarization_node)
         
         # Define the workflow edges
         workflow.set_entry_point("data_processing")
         
-        workflow.add_edge("data_processing", "insight_generation")
         workflow.add_edge("data_processing", "risk_assessment")
-        
+        workflow.add_edge("risk_assessment", "ingest_rag_data")
+        workflow.add_edge("ingest_rag_data", "insight_generation")
         workflow.add_edge("insight_generation", "summarization")
-        workflow.add_edge("risk_assessment", "summarization")
         
         workflow.add_edge("summarization", END)
         
@@ -119,37 +121,36 @@ class FinAgentOrchestrator:
         logger.info("🔄 Running Insight Generation Agent...")
         
         try:
-            processed_df = state.get('processed_data')
+            # Use the fraud-scored data from Risk Agent if available, otherwise use processed data
+            df_for_insights = state.get('fraud_predictions') or state.get('processed_data')
             
-            if processed_df is None:
-                raise ValueError("No processed data available")
+            if df_for_insights is None:
+                raise ValueError("No data available for insights")
             
             # Generate summary statistics
-            summary = self.insight_agent.get_summary(processed_df)
+            summary = self.insight_agent.get_summary(df_for_insights)
             
             # Analyze trends
-            trends = self.insight_agent.analyze_trends(processed_df)
+            trends = self.insight_agent.analyze_trends(df_for_insights)
             
-            # Try to generate AI insights if LLM is available
+            # Try to generate AI insights if LLM is available and RAG is set up
             ai_insights = {}
             try:
-                # Ingest data into vector store (sample for efficiency)
-                sample_size = min(1000, len(processed_df))
-                sample_df = processed_df.sample(n=sample_size, random_state=42)
-                
-                self.insight_agent.ingest_data(sample_df)
-                
-                # Generate insights on key questions
-                questions = [
-                    "What are the main spending patterns in this dataset?",
-                    "Are there any unusual transaction behaviors?",
-                    "What merchant categories have the highest transaction volumes?"
-                ]
-                
-                for question in questions:
-                    result = self.insight_agent.generate_insights(question)
-                    ai_insights[question] = result['answer']
-                
+                # Only generate insights if RAG has been set up
+                if state.get('rag_ingested', False):
+                    # Generate insights on key questions
+                    questions = [
+                        "What are the main spending patterns in this dataset?",
+                        "Are there any unusual transaction behaviors?",
+                        "What merchant categories have the highest transaction volumes?"
+                    ]
+                    
+                    for question in questions:
+                        result = self.insight_agent.generate_insights(question)
+                        ai_insights[question] = result['answer']
+                else:
+                    ai_insights = {"note": "RAG not initialized. Skipping AI insights generation."}
+                    
             except Exception as e:
                 logger.warning(f"Could not generate AI insights: {e}")
                 ai_insights = {"note": "AI insights unavailable (check API keys)"}
@@ -278,6 +279,52 @@ class FinAgentOrchestrator:
         logger.info("✓ Workflow compiled")
         return self.app
     
+    def _ingest_rag_data_node(self, state: AgentState) -> AgentState:
+        """Node for ingesting data into RAG system"""
+        logger.info("🔄 Running RAG Data Ingestion...")
+        
+        try:
+            # Only ingest data if it hasn't been done already
+            if not state.get('rag_ingested', False):
+                # Use the fraud-scored data from Risk Agent if available
+                df_for_rag = state.get('fraud_predictions') or state.get('processed_data')
+                
+                if df_for_rag is None:
+                    raise ValueError("No data available for RAG ingestion")
+                
+                # Convert DataFrame to LangChain Documents
+                rag_documents = self.data_agent.to_langchain_documents(df_for_rag)
+                
+                # Ingest documents into vector store
+                sample_size = min(1000, len(rag_documents))
+                sample_docs = rag_documents[:sample_size]  # Use first 1000 docs for efficiency
+                
+                # Extract content from documents for ingestion
+                content_list = [doc.page_content for doc in sample_docs]
+                df_for_ingestion = pd.DataFrame({'content': content_list})
+                
+                self.insight_agent.ingest_data(df_for_ingestion)
+                
+                state['rag_documents'] = rag_documents
+                state['rag_ingested'] = True
+                state['messages'] = state.get('messages', []) + [
+                    "✓ RAG Data Ingestion Complete",
+                    f"✓ Ingested {len(sample_docs)} documents into vector store"
+                ]
+                
+                logger.info("✓ RAG Data Ingestion completed")
+            else:
+                state['messages'] = state.get('messages', []) + [
+                    "✓ RAG Data Ingestion Skipped (already done)",
+                ]
+                logger.info("✓ RAG Data Ingestion skipped (already done)")
+        except Exception as e:
+            logger.error(f"Error in RAG data ingestion: {e}")
+            state['error'] = state.get('error', '') + f"\nRAG Ingestion Error: {e}"
+            state['messages'] = state.get('messages', []) + [f"✗ RAG Ingestion Error: {e}"]
+        
+        return state
+    
     def run(self, data_path: str = None, data: pd.DataFrame = None) -> Dict:
         """Run the complete multi-agent workflow"""
         
@@ -288,6 +335,7 @@ class FinAgentOrchestrator:
         initial_state = {
             'raw_data_path': data_path,
             'data': data,
+            'rag_ingested': False,
             'messages': []
         }
         

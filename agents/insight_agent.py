@@ -4,11 +4,11 @@ Insight Agent: Runs LLM with Graph-RAG for contextual insights
 import os
 import logging
 from typing import List, Dict, Optional
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain_core.prompts import PromptTemplate
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
@@ -52,27 +52,8 @@ class InsightAgent:
                 )
                 logger.info("✓ Groq LLM initialized")
                 
-            elif self.config.LLM_PROVIDER == "together" and self.config.TOGETHER_API_KEY:
-                from langchain_together import Together
-                self.llm = Together(
-                    together_api_key=self.config.TOGETHER_API_KEY,
-                    model=self.config.FREE_MODELS['together'],
-                    temperature=self.config.LLM_TEMPERATURE,
-                )
-                logger.info("✓ Together AI LLM initialized")
-                
-            elif self.config.OPENAI_API_KEY:
-                from langchain_openai import ChatOpenAI
-                self.llm = ChatOpenAI(
-                    openai_api_key=self.config.OPENAI_API_KEY,
-                    model_name=self.config.FREE_MODELS['openai'],
-                    temperature=self.config.LLM_TEMPERATURE,
-                )
-                logger.info("✓ OpenAI LLM initialized")
-                
             else:
                 logger.warning("No API keys configured. Using mock LLM for testing.")
-                # Fallback: Use a simple mock for testing
                 from langchain.llms.fake import FakeListLLM
                 self.llm = FakeListLLM(
                     responses=[
@@ -172,7 +153,7 @@ Answer:"""
         )
         
         # Create retrieval QA chain
-        self.qa_chain = RetrievalQA.from_chain_type(
+        self.qa_chain = create_retrieval_chain.from_chain_type(
             llm=self.llm,
             chain_type="stuff",
             retriever=self.vector_store.as_retriever(
