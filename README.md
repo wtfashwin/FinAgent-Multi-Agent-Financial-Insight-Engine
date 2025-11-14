@@ -285,7 +285,6 @@ Contributions to FinAgent are welcome! Please follow these steps:
 
 ## Acknowledgments
 
-*   Thanks to all contributors who have helped shape FinAgent
 *   Inspired by the need for accessible financial analysis tools
 *   Built with open-source technologies including FastAPI, Streamlit, LangChain, and scikit-learn
 
