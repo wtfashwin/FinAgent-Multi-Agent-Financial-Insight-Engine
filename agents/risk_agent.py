@@ -10,7 +10,7 @@ from sklearn.metrics import classification_report, roc_auc_score, confusion_matr
 from imblearn.over_sampling import SMOTE
 import joblib
 import logging
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +28,7 @@ class RiskAgent:
         self.label_encoders = {}
         self.feature_columns = []
         
-    def prepare_features(self, df: pd.DataFrame, target_col: str = None) -> Tuple[pd.DataFrame, pd.Series]:
+    def prepare_features(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Series]:
         """Prepare features for ML models"""
         logger.info("Preparing features for ML model...")
         
@@ -36,8 +36,22 @@ class RiskAgent:
         
         # Identify target column if not specified
         if target_col is None:
-            fraud_cols = [col for col in df.columns if 'fraud' in col.lower() or 'label' in col.lower()]
+            # Fix: Handle various naming conventions for fraud/label columns
+            fraud_cols = []
+            possible_fraud_columns = ['Class', 'class', 'is_fraud', 'IsFraud', 'fraud', 'Fraud', 'label', 'Label', 'is_anomaly', 'IsAnomaly']
+            
+            for col in df.columns:
+                for fraud_name in possible_fraud_columns:
+                    if fraud_name.lower() == col.lower() or fraud_name.upper() == col.upper():
+                        fraud_cols.append(col)
+                        break
+            
             target_col = fraud_cols[0] if fraud_cols else None
+            
+            if target_col is None:
+                logger.info("No fraud/label column found. Proceeding with unsupervised learning.")
+            else:
+                logger.info(f"Found fraud/label column: {target_col}")
         
         # Separate features and target
         y = df_processed[target_col] if target_col and target_col in df_processed.columns else None
@@ -89,7 +103,7 @@ class RiskAgent:
         logger.info(f"Prepared {len(self.feature_columns)} features")
         return X_scaled, y
     
-    def train_fraud_model(self, df: pd.DataFrame, target_col: str = None) -> Dict:
+    def train_fraud_model(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Dict:
         """Train fraud detection model"""
         logger.info("Training fraud detection model...")
         

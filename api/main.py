@@ -13,9 +13,8 @@ import io
 import logging
 from pathlib import Path
 import sys
-
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent))
+# from contextlib import asynccontextmanager 
+sys.path.append(str(Path(__file__).parent.parent)) 
 
 from orchestrator import FinAgentOrchestrator
 from agents.data_agent import DataAgent
@@ -75,7 +74,7 @@ async def startup_event():
     """Initialize agents on startup"""
     global orchestrator
     
-    logger.info("🚀 Starting FinAgent API...")
+    logger.info(" Starting FinAgent API...")
     orchestrator = FinAgentOrchestrator(config=Config)
     orchestrator.compile()
     logger.info("✓ FinAgent initialized successfully")
@@ -118,10 +117,10 @@ async def upload_file(file: UploadFile = File(...)):
     global current_data
     
     try:
-        # Read uploaded file
+        if file.filename is None:
+            raise HTTPException(status_code=400, detail="File name is missing.")        
         contents = await file.read()
-        
-        # Detect file type and read accordingly
+    
         if file.filename.endswith('.csv'):
             df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
         elif file.filename.endswith('.json'):
@@ -129,10 +128,8 @@ async def upload_file(file: UploadFile = File(...)):
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Use CSV or JSON.")
         
-        # Store data globally (in production, use database)
         current_data = df
         
-        # Get basic statistics
         stats = {
             "filename": file.filename,
             "rows": len(df),
@@ -167,10 +164,8 @@ async def analyze_data(background_tasks: BackgroundTasks):
     try:
         logger.info("🔄 Starting analysis...")
         
-        # Run orchestrator
         result = orchestrator.run(data=current_data)
         
-        # Extract results
         response = AnalysisResponse(
             status="success",
             message="Analysis completed successfully",
@@ -194,7 +189,6 @@ async def analyze_data(background_tasks: BackgroundTasks):
 
 @app.post("/api/insights")
 async def generate_insights(query: InsightQuery):
-    """Generate insights based on a specific query"""
     global current_data
     
     if current_data is None:
@@ -226,17 +220,38 @@ async def generate_insights(query: InsightQuery):
 @app.get("/api/risk/summary")
 async def get_risk_summary():
     """Get risk assessment summary"""
-    global orchestrator
+    global orchestrator, current_data
     
-    if orchestrator is None or orchestrator.risk_agent.fraud_model is None:
+    # Fix: Check if orchestrator and risk agent are properly initialized
+    if orchestrator is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Orchestrator not initialized. Start the service properly."
+        )
+    
+    if orchestrator.risk_agent is None or orchestrator.risk_agent.fraud_model is None:
         raise HTTPException(
             status_code=400, 
             detail="No risk model available. Run analysis first."
         )
     
+    # Fix: Check if current_data is available
+    if current_data is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="No data available. Upload data first."
+        )
+    
     try:
-        predictions = orchestrator.risk_agent.predict_fraud(current_data)
-        summary = orchestrator.risk_agent.get_risk_summary(predictions)
+        # Fix: Ensure current_data is not None before calling predict_fraud
+        if current_data is not None:
+            predictions = orchestrator.risk_agent.predict_fraud(current_data)
+            summary = orchestrator.risk_agent.get_risk_summary(predictions)
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="No data available for risk assessment."
+            )
         
         return JSONResponse({
             "status": "success",
