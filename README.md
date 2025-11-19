@@ -9,34 +9,44 @@ FinAgent is a powerful multi-agent system designed to provide comprehensive fina
 ├── app.py
 ├── config.py
 ├── orchestrator.py
-├── req.txt
+├── requirements.txt
 ├── agents/
+│   ├── collaboration_agent.py
 │   ├── data_agent.py
 │   ├── insight_agent.py
-│   └── risk_agent.py
+│   ├── ml_enhancement_agent.py
+│   ├── risk_agent.py
+│   ├── security_agent.py
+│   ├── streaming_agent.py
+│   ├── user_profile_agent.py
+│   └── visualization_agent.py
 ├── api/
 │   └── main.py
 ├── tests/
 │   ├── __init__.py
-│   ├── test_data_agent.py
-│   ├── test_risk_agent.py
-│   ├── test_orchestrator.py
-│   └── test_api.py
+│   └── test_finagent.py
 ├── chroma_db/ (runtime generated)
 ├── data/
-└── models/
+├── models/
+├── team_workspaces/
+└── user_profiles/
 ```
 
 ## Features
 
-*   **Data Ingestion:** Upload transaction data in CSV or JSON format.
-*   **Multi-Agent Analysis:** Orchestrates specialized agents for a holistic financial review.
-    *   **Data Agent:** Processes raw data, generates statistics, and detects anomalies.
-    *   **Insight Agent:** Answers natural language queries about financial data using LLMs and RAG.
-    *   **Risk Agent:** Performs fraud detection and risk assessment using machine learning models.
-*   **Interactive Dashboard:** Streamlit frontend for easy interaction and visualization.
+*   **Multi-Agent Architecture:** Orchestrates specialized agents for comprehensive financial analysis.
+*   **Data Processing Agent:** Processes raw data, generates statistics, and detects anomalies.
+*   **Risk Assessment Agent:** Performs fraud detection and risk assessment using machine learning models.
+*   **Insight Generation Agent:** Answers natural language queries about financial data using LLMs and RAG.
+*   **Collaboration Agent:** Enables team-based financial analysis with workspaces and sharing capabilities.
+*   **ML Enhancement Agent:** Provides natural language querying and enhanced ML capabilities.
+*   **Streaming Agent:** Real-time transaction monitoring and alerting system.
+*   **Visualization Agent:** Advanced data visualization and reporting capabilities.
+*   **Security Agent:** Implements security measures and compliance features.
+*   **User Profile Agent:** Manages user preferences and personalized experiences.
 *   **RESTful API:** FastAPI backend for programmatic access to FinAgent capabilities.
-*   **Comprehensive Testing:** Full test suite with unit and integration tests for all components.
+*   **Interactive Dashboard:** Streamlit frontend for easy interaction and visualization.
+*   **Comprehensive Testing:** Consolidated test suite for all components.
 
 ## How It Works
 
@@ -46,16 +56,13 @@ FinAgent uses a multi-agent architecture orchestrated by LangGraph to process fi
 2. **Risk Assessment Agent**: Trains machine learning models to detect fraudulent transactions and assess risk levels using supervised (when labels available) or unsupervised learning approaches.
 3. **RAG Ingestion**: Converts processed data into documents and ingests them into a vector database for retrieval-augmented generation.
 4. **Insight Generation Agent**: Uses large language models to analyze transaction patterns, answer natural language queries, and generate actionable insights.
-5. **Summarization**: Creates a comprehensive summary of findings including risk assessments, anomalies detected, and key insights.
+5. **Collaboration Agent**: Enables team-based financial analysis with workspaces, sharing, and commenting features.
+6. **ML Enhancement Agent**: Provides advanced ML capabilities including natural language querying and ensemble modeling.
+7. **Streaming Agent**: Monitors transactions in real-time and generates alerts for suspicious activities.
+8. **Visualization Agent**: Creates advanced visualizations and comprehensive reports.
+9. **Summarization**: Creates a comprehensive summary of findings including risk assessments, anomalies detected, and key insights.
 
 The workflow ensures that data flows seamlessly from ingestion to insight generation, with each agent building upon the work of the previous one.
-
-![alt text](image.png)
-
-![alt text](image-1.png)
-
-![alt text](image-2.png)
-
 
 ## Setup and Installation
 
@@ -87,10 +94,10 @@ To get the FinAgent project up and running, follow these steps:
 
 4.  **Install Dependencies:**
 
-    Install all the necessary Python packages using the provided `req.txt` file:
+    Install all the necessary Python packages using the provided `requirements.txt` file:
 
     ```bash
-    pip install -r req.txt
+    pip install -r requirements.txt
     ```
 
 5.  **Install Additional Required Dependencies:**
@@ -174,6 +181,25 @@ The FastAPI backend provides the following endpoints:
 *   `GET /api/risk/summary` - Get risk assessment summary
 *   `GET /api/statistics` - Get dataset statistics
 *   `GET /api/anomalies` - Get detected anomalies
+*   `POST /api/data/sample` - Get sample of current data
+*   `POST /api/stream/start` - Start real-time transaction monitoring
+*   `POST /api/stream/stop` - Stop real-time transaction monitoring
+*   `GET /api/stream/status` - Get real-time streaming status
+*   `GET /api/stream/events` - Stream real-time transaction events
+*   `POST /api/visualizations/generate` - Generate specific visualizations
+*   `GET /api/visualizations/{viz_name}` - Get a specific visualization by name
+*   `GET /api/visualizations/list` - List all available visualizations
+*   `POST /api/collaboration/workspace/create` - Create a new team workspace
+*   `POST /api/collaboration/workspace/add_member` - Add a member to a workspace
+*   `GET /api/collaboration/workspaces/{user_id}` - List all workspaces for a user
+*   `POST /api/collaboration/analysis/share` - Share an analysis with a workspace
+*   `POST /api/collaboration/analysis/comment` - Add a comment to a shared analysis
+*   `GET /api/collaboration/workspace/{workspace_id}/analyses` - Get all shared analyses in a workspace
+*   `GET /api/collaboration/workspace/{workspace_id}/activity` - Get activity log for a workspace
+*   `POST /api/ml/query` - Process natural language query on transaction data
+*   `POST /api/ml/train` - Train enhanced ML models with ensemble methods
+*   `GET /api/ml/insights` - Get insights from trained ML models
+*   `POST /api/ml/explain/{transaction_id}` - Explain why a transaction was flagged as high-risk
 
 ## Testing
 
@@ -184,19 +210,24 @@ FinAgent includes a comprehensive test suite to ensure reliability and maintaina
 python -m pytest tests/
 
 # Run specific test file
-python -m pytest tests/test_data_agent.py
-
-# Run specific test
-python -m pytest tests/test_data_agent.py::TestDataAgent::test_load_data
+python -m pytest tests/test_finagent.py
 
 # Run tests with coverage
 python -m pytest tests/ --cov=agents --cov=orchestrator --cov=api --cov-report=html
 ```
 
+## Recent Improvements
+
+*   **Deprecated Startup Event Fixed:** Replaced `@app.on_event("startup")` with modern lifespan approach using `@asynccontextmanager`
+*   **Missing Models Added:** Added `VisualizationRequest` and `TransactionStream` models
+*   **Performance Optimizations:** Implemented caching for visualization and analysis results
+*   **Bug Fixes:** Fixed numpy usage in streaming function
+*   **Code Cleanup:** Removed unnecessary test files and consolidated into a single comprehensive test file
+*   **Enhanced Functionality:** Added collaboration, ML enhancement, streaming, visualization, security, and user profile agents
+
 ## Potential Enhancements
 
 To make FinAgent more robust and feature-rich, consider implementing the following enhancements:
-
 
 ### 1. Advanced Insight Generation
 *   Integrate multiple LLM providers for redundancy and comparison
