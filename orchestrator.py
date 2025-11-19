@@ -33,6 +33,9 @@ class AgentState(TypedDict):
     summary: str
     error: str
     messages: Annotated[List[str], operator.add]
+    data_quality_report: Dict
+    visualizations: Dict
+    time_series_patterns: Dict
 
 
 class FinAgentOrchestrator:
@@ -88,6 +91,10 @@ class FinAgentOrchestrator:
             else:
                 raise ValueError("No data provided")
             
+            # Assess data quality
+            quality_report = self.data_agent.assess_data_quality()
+            state['data_quality_report'] = quality_report.get_report()
+            
             # Clean data
             processed_df = self.data_agent.clean_data()
             
@@ -96,6 +103,22 @@ class FinAgentOrchestrator:
             
             # Detect anomalies
             anomalies = self.data_agent.detect_anomalies()
+            
+            # Generate visualizations
+            try:
+                visualizations = self.data_agent.generate_visualizations()
+                state['visualizations'] = visualizations
+            except Exception as e:
+                logger.warning(f"Could not generate visualizations: {e}")
+                state['visualizations'] = {}
+            
+            # Detect time-series patterns
+            try:
+                time_series_patterns = self.data_agent.detect_time_series_patterns()
+                state['time_series_patterns'] = time_series_patterns
+            except Exception as e:
+                logger.warning(f"Could not detect time-series patterns: {e}")
+                state['time_series_patterns'] = {}
             
             # Get statistics
             stats = self.data_agent.get_statistics()
@@ -261,6 +284,15 @@ class FinAgentOrchestrator:
             if state.get('anomalies'):
                 anomaly_text = f"\n⚠️  Anomalies Detected: {len(state['anomalies'])} unusual transactions\n"
                 summary_parts.append(anomaly_text)
+            
+            # Add data quality information
+            if state.get('data_quality_report'):
+                quality_report = state['data_quality_report']
+                quality_text = f"\n Data Quality Report:\n"
+                quality_text += f"  • Total Rows: {quality_report.get('metrics', {}).get('total_rows', 'N/A')}\n"
+                quality_text += f"  • Missing Values: {quality_report.get('metrics', {}).get('missing_values', 'N/A')}\n"
+                quality_text += f"  • Duplicate Rows: {quality_report.get('metrics', {}).get('duplicate_rows', 'N/A')}\n"
+                summary_parts.append(quality_text)
             
             state['summary'] = '\n'.join(summary_parts)
             state['messages'] = state.get('messages', []) + ["✓ Analysis Complete"]
