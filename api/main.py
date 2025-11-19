@@ -16,6 +16,7 @@ import sys
 import asyncio
 import json
 from datetime import datetime
+import base64
 # from contextlib import asynccontextmanager 
 sys.path.append(str(Path(__file__).parent.parent)) 
 
@@ -79,6 +80,11 @@ class TransactionStream(BaseModel):
     timestamp: str
 
 
+class VisualizationRequest(BaseModel):
+    visualization_type: str
+    parameters: Optional[Dict] = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize agents on startup"""
@@ -104,7 +110,8 @@ async def root():
             "insights": "/api/insights",
             "risk": "/api/risk",
             "statistics": "/api/statistics",
-            "streaming": "/api/stream/start"
+            "streaming": "/api/stream/start",
+            "visualizations": "/api/visualizations"
         }
     }
 
@@ -519,6 +526,113 @@ async def stream_events():
                 break
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# Visualization endpoints
+@app.post("/api/visualizations/generate")
+async def generate_visualizations(request: VisualizationRequest):
+    """Generate specific visualizations"""
+    global orchestrator, current_data
+    
+    if current_data is None:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if orchestrator is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+    
+    try:
+        # Run analysis with visualization request
+        result = orchestrator.run(data=current_data, user_query="Generate advanced visualizations")
+        
+        # Get visualizations from result
+        visualizations = result.get('advanced_visualizations', {})
+        
+        if not visualizations:
+            raise HTTPException(status_code=404, detail="No visualizations generated")
+        
+        return JSONResponse({
+            "status": "success",
+            "visualizations": list(visualizations.keys()),
+            "message": f"Generated {len(visualizations)} visualizations"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error generating visualizations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/visualizations/{viz_name}")
+async def get_visualization(viz_name: str):
+    """Get a specific visualization by name"""
+    global orchestrator, current_data
+    
+    if current_data is None:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if orchestrator is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+    
+    try:
+        # Run analysis with visualization request if not already done
+        result = orchestrator.run(data=current_data, user_query="Generate advanced visualizations")
+        
+        # Get visualizations from result
+        visualizations = result.get('advanced_visualizations', {})
+        
+        if viz_name not in visualizations:
+            raise HTTPException(status_code=404, detail=f"Visualization '{viz_name}' not found")
+        
+        viz_data = visualizations[viz_name]
+        
+        # Check if it's an interactive visualization (HTML) or static image
+        if viz_data.startswith('<'):
+            # Interactive visualization (HTML)
+            return HTMLResponse(content=viz_data, status_code=200)
+        else:
+            # Static image (base64)
+            return JSONResponse({
+                "status": "success",
+                "visualization_name": viz_name,
+                "data": viz_data,
+                "type": "image"
+            })
+        
+    except Exception as e:
+        logger.error(f"Error getting visualization: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/visualizations/list")
+async def list_visualizations():
+    """List all available visualizations"""
+    global orchestrator, current_data
+    
+    if current_data is None:
+        return JSONResponse({
+            "status": "success",
+            "visualizations": [],
+            "message": "No data available - upload data to generate visualizations"
+        })
+    
+    if orchestrator is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+    
+    try:
+        # Run analysis with visualization request if not already done
+        result = orchestrator.run(data=current_data, user_query="Generate advanced visualizations")
+        
+        # Get visualizations from result
+        visualizations = result.get('advanced_visualizations', {})
+        
+        return JSONResponse({
+            "status": "success",
+            "visualizations": list(visualizations.keys()),
+            "count": len(visualizations)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listing visualizations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Run the API

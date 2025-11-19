@@ -25,7 +25,8 @@ except ImportError:
 from agents.data_agent import DataAgent
 from agents.insight_agent import InsightAgent
 from agents.risk_agent import RiskAgent
-from agents.streaming_agent import StreamingAgent  # Added streaming agent
+from agents.streaming_agent import StreamingAgent
+from agents.visualization_agent import VisualizationAgent  # Added visualization agent
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
@@ -56,7 +57,9 @@ class AgentState(TypedDict):
     tool_calls: List[Dict]
     dynamic_workflow: bool
     # New field for streaming
-    streaming_active: bool  # Added streaming field
+    streaming_active: bool
+    # New field for advanced visualizations
+    advanced_visualizations: Dict  # Added visualization field
 
 
 # Define tools for autonomous agent selection
@@ -81,8 +84,13 @@ if LANGCHAIN_TOOLS_AVAILABLE:
         """Start real-time transaction monitoring. Use this when the user wants to monitor transactions in real-time."""
         return "Real-time transaction monitoring started"
 
+    @tool
+    def generate_visualizations_tool() -> str:
+        """Generate advanced visualizations and reports. Use this when the user wants to see charts, graphs, and detailed reports."""
+        return "Advanced visualization and reporting started"
+
     # List of available tools
-    FINANCIAL_TOOLS = [process_data_tool, assess_risk_tool, generate_insights_tool, start_streaming_tool]
+    FINANCIAL_TOOLS = [process_data_tool, assess_risk_tool, generate_insights_tool, start_streaming_tool, generate_visualizations_tool]
 else:
     FINANCIAL_TOOLS = []
 
@@ -191,6 +199,15 @@ class AutonomousOrchestrator:
                 'result': 'Real-time monitoring recommended'
             })
         
+        # Visualization keywords
+        visualization_keywords = ['visual', 'chart', 'graph', 'plot', 'dashboard', 'report', 'summary']
+        if any(keyword in query_lower for keyword in visualization_keywords):
+            tool_calls.append({
+                'tool': 'generate_visualizations_tool',
+                'arguments': {},
+                'result': 'Advanced visualization recommended'
+            })
+        
         return tool_calls
 
 
@@ -204,7 +221,8 @@ class FinAgentOrchestrator:
         self.data_agent = DataAgent()
         self.insight_agent = InsightAgent(config=self.config)
         self.risk_agent = RiskAgent()
-        self.streaming_agent = StreamingAgent()  # Added streaming agent
+        self.streaming_agent = StreamingAgent()
+        self.visualization_agent = VisualizationAgent()  # Added visualization agent
         
         # Connect agents
         self.streaming_agent.set_risk_agent(self.risk_agent)
@@ -232,7 +250,9 @@ class FinAgentOrchestrator:
         # New node for autonomous tool selection
         workflow.add_node("autonomous_routing", self._autonomous_routing_node)
         # New node for streaming
-        workflow.add_node("start_streaming", self._start_streaming_node)  # Added streaming node
+        workflow.add_node("start_streaming", self._start_streaming_node)
+        # New node for advanced visualizations
+        workflow.add_node("generate_visualizations", self._generate_visualizations_node)  # Added visualization node
         
         # Define the workflow edges
         workflow.set_entry_point("autonomous_routing")
@@ -245,7 +265,8 @@ class FinAgentOrchestrator:
                 "data_processing": "data_processing",
                 "risk_assessment": "risk_assessment",
                 "insight_generation": "ingest_rag_data",
-                "start_streaming": "start_streaming",  # Added streaming route
+                "start_streaming": "start_streaming",
+                "generate_visualizations": "generate_visualizations",  # Added visualization route
                 "summarization": "summarization",
                 "continue": "data_processing"  # Default route
             }
@@ -257,7 +278,8 @@ class FinAgentOrchestrator:
         workflow.add_edge("insight_generation", "summarization")
         
         workflow.add_edge("summarization", END)
-        workflow.add_edge("start_streaming", END)  # Added streaming edge
+        workflow.add_edge("start_streaming", END)
+        workflow.add_edge("generate_visualizations", END)  # Added visualization edge
         
         return workflow
     
@@ -302,7 +324,8 @@ class FinAgentOrchestrator:
             'process_data_tool': 'data_processing',
             'assess_risk_tool': 'risk_assessment',
             'generate_insights_tool': 'insight_generation',
-            'start_streaming_tool': 'start_streaming'  # Added streaming route
+            'start_streaming_tool': 'start_streaming',
+            'generate_visualizations_tool': 'generate_visualizations'  # Added visualization route
         }
         
         return routing_map.get(primary_tool, 'data_processing')
@@ -325,6 +348,43 @@ class FinAgentOrchestrator:
             logger.error(f"Error starting streaming: {e}")
             state['error'] = state.get('error', '') + f"\nStreaming Error: {e}"
             state['messages'] = state.get('messages', []) + [f"✗ Streaming Error: {e}"]
+        
+        return state
+    
+    def _generate_visualizations_node(self, state: AgentState) -> AgentState:
+        """Node for generating advanced visualizations and reports"""
+        logger.info("🔄 Generating Advanced Visualizations...")
+        
+        try:
+            # Get processed data
+            processed_df = state.get('processed_data')
+            fraud_predictions = state.get('fraud_predictions')
+            
+            if processed_df is None:
+                raise ValueError("No processed data available for visualization")
+            
+            # Generate advanced visualizations
+            visualizations = self.visualization_agent.generate_advanced_visualizations(
+                processed_df, fraud_predictions
+            )
+            
+            # Generate report summary
+            report_summary = self.visualization_agent.generate_report_summary(
+                processed_df, visualizations
+            )
+            
+            state['advanced_visualizations'] = visualizations
+            state['messages'] = state.get('messages', []) + [
+                "✓ Advanced Visualizations Generated",
+                f"✓ Created {len(visualizations)} visualizations and reports"
+            ]
+            
+            logger.info("✓ Advanced visualizations generated")
+            
+        except Exception as e:
+            logger.error(f"Error generating visualizations: {e}")
+            state['error'] = state.get('error', '') + f"\nVisualization Error: {e}"
+            state['messages'] = state.get('messages', []) + [f"✗ Visualization Error: {e}"]
         
         return state
     
@@ -648,7 +708,8 @@ class FinAgentOrchestrator:
             'rag_ingested': False,
             'messages': [],
             'user_query': user_query or '',
-            'streaming_active': False  # Initialize streaming state
+            'streaming_active': False,
+            'advanced_visualizations': {}  # Initialize visualization state
         }
         
         logger.info("🚀 Starting FinAgent Multi-Agent Workflow...")
@@ -684,7 +745,7 @@ if __name__ == "__main__":
     
     # Run orchestrator
     orchestrator = FinAgentOrchestrator()
-    result = orchestrator.run(data=sample_data, user_query="Start real-time monitoring of transactions")
+    result = orchestrator.run(data=sample_data, user_query="Generate advanced visualizations and reports")
     
     # Display results
     print("\n" + "="*50)
