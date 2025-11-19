@@ -13,6 +13,7 @@ sys.path.append(str(Path(__file__).parent))
 from agents.insight_agent import InsightAgent, HybridRetriever, Reranker
 from agents.data_agent import DataAgent
 from agents.streaming_agent import StreamingAgent
+from agents.visualization_agent import VisualizationAgent
 from orchestrator import FinAgentOrchestrator
 
 def main():
@@ -79,7 +80,8 @@ def main():
             "Analyze fraud patterns in my transactions",
             "Process this transaction data file",
             "What are the spending trends?",
-            "Start real-time monitoring of transactions"
+            "Start real-time monitoring of transactions",
+            "Generate advanced visualizations and reports"
         ]
         
         for query in test_queries:
@@ -131,12 +133,41 @@ def main():
     except Exception as e:
         print(f"   ✗ Error in Real-time Transaction Monitoring: {e}")
     
+    # Test Advanced Visualization & Reporting
+    print("\n6. Testing Advanced Visualization & Reporting...")
+    try:
+        # Test VisualizationAgent
+        viz_agent = VisualizationAgent()
+        print("   ✓ VisualizationAgent initialized successfully")
+        
+        # Generate advanced visualizations
+        risk_data = sample_data.copy()
+        risk_data['fraud_probability'] = np.random.beta(2, 8, len(sample_data))
+        
+        visualizations = viz_agent.generate_advanced_visualizations(sample_data, risk_data)
+        print(f"   ✓ Generated {len(visualizations)} advanced visualizations")
+        
+        # Generate report summary
+        report = viz_agent.generate_report_summary(sample_data, visualizations)
+        print(f"   ✓ Generated report summary with {report['dataset_info']['total_records']} records")
+        
+        # Show sample visualization names
+        if visualizations:
+            viz_names = list(visualizations.keys())[:3]
+            print(f"   ✓ Sample visualizations: {viz_names}")
+        
+        print("   ✓ Advanced visualization and reporting features implemented")
+        
+    except Exception as e:
+        print(f"   ✗ Error in Advanced Visualization & Reporting: {e}")
+    
     print("\n=== Demo Complete ===")
     print("\nAdvanced Features Summary:")
     print("✓ FT 1.1: Hybrid Search & Reranking - Implemented with BM25 + Vector Search + Cross-Encoder Reranking")
     print("✓ FT 1.2: Autonomous Tool Calling - Implemented with keyword-based routing and LLM tool selection")
     print("✓ FT 1.3: Explainable RAG - Implemented with document metadata tracking and source attribution")
     print("✓ Real-time Transaction Monitoring - Implemented with streaming agent and alert system")
+    print("✓ Advanced Visualization & Reporting - Implemented with interactive dashboards and reports")
 
 if __name__ == "__main__":
     main()

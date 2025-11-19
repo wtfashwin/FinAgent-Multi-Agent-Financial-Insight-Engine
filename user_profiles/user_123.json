@@ -1,0 +1,24 @@
+{
+  "user_id": "user_123",
+  "created_at": "2025-11-20T01:33:08.692660",
+  "last_updated": "2025-11-20T01:33:08.694348",
+  "preferences": {
+    "risk_threshold": 0.8,
+    "high_risk_threshold": 0.5,
+    "visualization_style": "default",
+    "report_format": "summary",
+    "notification_preferences": {
+      "email": false,
+      "push": true,
+      "sms": false
+    }
+  },
+  "history": {
+    "recent_analyses": [],
+    "favorite_queries": [],
+    "saved_reports": [],
+    "viewed_visualizations": []
+  },
+  "custom_rules": [],
+  "watchlist": []
+}

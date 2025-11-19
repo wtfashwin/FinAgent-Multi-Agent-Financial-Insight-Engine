@@ -4,7 +4,7 @@ Provides REST API endpoints for agent interactions
 """
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 import pandas as pd
@@ -17,23 +17,54 @@ import asyncio
 import json
 from datetime import datetime
 import base64
-# from contextlib import asynccontextmanager 
-sys.path.append(str(Path(__file__).parent.parent)) 
+import numpy as np
+from contextlib import asynccontextmanager
+sys.path.append(str(Path(__file__).parent.parent))
 
 from orchestrator import FinAgentOrchestrator
 from agents.data_agent import DataAgent
 from agents.insight_agent import InsightAgent
 from agents.risk_agent import RiskAgent
+from agents.collaboration_agent import CollaborationAgent
+from agents.ml_enhancement_agent import MLEnhancementAgent
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
+orchestrator = None
+current_data = None
+streaming_task = None
+streaming_queue = asyncio.Queue()
+collaboration_agent = None
+ml_enhancement_agent = None
+visualization_cache = {}
+analysis_cache = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan events"""
+    global orchestrator, collaboration_agent, ml_enhancement_agent
+    
+    logger.info(" Starting FinAgent API...")
+    orchestrator = FinAgentOrchestrator(config=Config)
+    orchestrator.compile()
+    collaboration_agent = CollaborationAgent()  # Initialize collaboration agent
+    ml_enhancement_agent = MLEnhancementAgent()  # Initialize ML enhancement agent
+    logger.info("✓ FinAgent initialized successfully")
+    
+    yield
+    
+    # Cleanup code would go here if needed
+    logger.info("✓ FinAgent shutting down...")
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="FinAgent API",
     description="Multi-Agent Financial Insight Engine API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -44,12 +75,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global state for agents (in production, use proper state management)
-orchestrator = None
-current_data = None
-streaming_task = None
-streaming_queue = asyncio.Queue()
 
 # Pydantic models for requests/responses
 class AnalysisRequest(BaseModel):
@@ -73,26 +98,55 @@ class AnalysisResponse(BaseModel):
     risk_assessment: Optional[Dict] = None
     statistics: Optional[Dict] = None
 
+# Added models for collaboration
+class WorkspaceCreateRequest(BaseModel):
+    workspace_name: str
+    owner_id: str
 
+class ShareAnalysisRequest(BaseModel):
+    workspace_id: str
+    user_id: str
+    analysis_data: Dict
+
+class AddCommentRequest(BaseModel):
+    workspace_id: str
+    analysis_id: str
+    user_id: str
+    comment: str
+
+class AddMemberRequest(BaseModel):
+    workspace_id: str
+    user_id: str
+
+# Added models for streaming
 class TransactionStream(BaseModel):
     transaction: Dict
     risk_score: float
     timestamp: str
 
+# Added models for ML enhancement
+class NLQueryRequest(BaseModel):
+    query: str
+    sample_data: Optional[bool] = True
 
+class ModelTrainingRequest(BaseModel):
+    target_column: str = "is_fraud"
+
+# Added model for visualizations
 class VisualizationRequest(BaseModel):
-    visualization_type: str
-    parameters: Optional[Dict] = None
-
+    chart_types: Optional[List[str]] = None
+    filters: Optional[Dict] = None
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize agents on startup"""
-    global orchestrator
+    global orchestrator, collaboration_agent, ml_enhancement_agent
     
     logger.info(" Starting FinAgent API...")
     orchestrator = FinAgentOrchestrator(config=Config)
     orchestrator.compile()
+    collaboration_agent = CollaborationAgent()  # Initialize collaboration agent
+    ml_enhancement_agent = MLEnhancementAgent()  # Initialize ML enhancement agent
     logger.info("✓ FinAgent initialized successfully")
 
 
@@ -426,19 +480,19 @@ async def _stream_transactions():
             # Generate a mock transaction
             transaction = {
                 'transaction_id': transaction_id,
-                'amount': float(pd.np.random.exponential(50)),
-                'merchant': pd.np.random.choice(merchants),
-                'category': pd.np.random.choice(categories),
-                'hour': int(pd.np.random.randint(0, 24)),
-                'day_of_week': int(pd.np.random.randint(0, 7))
+                'amount': float(np.random.exponential(50)),
+                'merchant': np.random.choice(merchants),
+                'category': np.random.choice(categories),
+                'hour': int(np.random.randint(0, 24)),
+                'day_of_week': int(np.random.randint(0, 7))
             }
             
             # Occasionally create high-risk transactions
-            if pd.np.random.random() < 0.05:
-                transaction['amount'] = float(pd.np.random.exponential(5000))
+            if np.random.random() < 0.05:
+                transaction['amount'] = float(np.random.exponential(5000))
                 transaction['merchant'] = 'Casino'
                 transaction['category'] = 'Gambling'
-                transaction['hour'] = int(pd.np.random.choice([2, 3, 4, 5]))
+                transaction['hour'] = int(np.random.choice([2, 3, 4, 5]))
             
             # Assess risk using the risk agent if available
             risk_score = 0.1  # Default low risk
@@ -532,7 +586,7 @@ async def stream_events():
 @app.post("/api/visualizations/generate")
 async def generate_visualizations(request: VisualizationRequest):
     """Generate specific visualizations"""
-    global orchestrator, current_data
+    global orchestrator, current_data, visualization_cache
     
     if current_data is None:
         raise HTTPException(status_code=400, detail="No data available")
@@ -541,6 +595,17 @@ async def generate_visualizations(request: VisualizationRequest):
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
     
     try:
+        # Check if we have cached visualizations
+        cache_key = f"viz_{hash(str(request.chart_types))}_{hash(str(request.filters))}"
+        if hasattr(generate_visualizations, 'cache') and cache_key in generate_visualizations.cache:
+            cached_result = generate_visualizations.cache[cache_key]
+            return JSONResponse({
+                "status": "success",
+                "visualizations": list(cached_result.keys()),
+                "message": f"Generated {len(cached_result)} visualizations (from cache)",
+                "cached": True
+            })
+        
         # Run analysis with visualization request
         result = orchestrator.run(data=current_data, user_query="Generate advanced visualizations")
         
@@ -550,10 +615,16 @@ async def generate_visualizations(request: VisualizationRequest):
         if not visualizations:
             raise HTTPException(status_code=404, detail="No visualizations generated")
         
+        # Cache the result
+        if not hasattr(generate_visualizations, 'cache'):
+            generate_visualizations.cache = {}
+        generate_visualizations.cache[cache_key] = visualizations
+        
         return JSONResponse({
             "status": "success",
             "visualizations": list(visualizations.keys()),
-            "message": f"Generated {len(visualizations)} visualizations"
+            "message": f"Generated {len(visualizations)} visualizations",
+            "cached": False
         })
         
     except Exception as e:
@@ -634,6 +705,311 @@ async def list_visualizations():
         logger.error(f"Error listing visualizations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# Collaboration endpoints
+@app.post("/api/collaboration/workspace/create")
+async def create_workspace(request: WorkspaceCreateRequest):
+    """Create a new team workspace"""
+    global collaboration_agent
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    try:
+        workspace_id = collaboration_agent.create_workspace(
+            request.workspace_name, request.owner_id
+        )
+        
+        return JSONResponse({
+            "status": "success",
+            "message": f"Workspace '{request.workspace_name}' created successfully",
+            "workspace_id": workspace_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error creating workspace: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/collaboration/workspace/add_member")
+async def add_member_to_workspace(request: AddMemberRequest):
+    """Add a member to a workspace"""
+    global collaboration_agent
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    try:
+        collaboration_agent.add_member_to_workspace(
+            request.workspace_id, request.user_id
+        )
+        
+        return JSONResponse({
+            "status": "success",
+            "message": f"User {request.user_id} added to workspace"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error adding member to workspace: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/collaboration/workspaces/{user_id}")
+async def list_workspaces(user_id: str):
+    """List all workspaces for a user"""
+    global collaboration_agent
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    try:
+        workspaces = collaboration_agent.list_workspaces_for_user(user_id)
+        
+        return JSONResponse({
+            "status": "success",
+            "workspaces": workspaces,
+            "count": len(workspaces)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listing workspaces: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/collaboration/analysis/share")
+async def share_analysis(request: ShareAnalysisRequest):
+    """Share an analysis with a workspace"""
+    global collaboration_agent, current_data, orchestrator, analysis_cache
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    if orchestrator is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+    
+    try:
+        # If no analysis data provided, run analysis first
+        analysis_data = request.analysis_data
+        if not analysis_data and current_data is not None:
+            # Check if we have cached analysis results
+            cache_key = f"analysis_{hash(str(current_data.head(100).to_dict()))}"
+            if cache_key in analysis_cache:
+                result = analysis_cache[cache_key]
+                logger.info("Using cached analysis results")
+            else:
+                result = orchestrator.run(data=current_data)
+                # Cache the result
+                analysis_cache[cache_key] = result
+                logger.info("Analysis completed and cached")
+            
+            analysis_data = {
+                'summary': result.get('summary', ''),
+                'risk_assessment': result.get('risk_assessment', {}),
+                'insights': result.get('insights', {}),
+                'anomalies': result.get('anomalies', [])
+            }
+        
+        analysis_id = collaboration_agent.share_analysis_with_workspace(
+            request.workspace_id, analysis_data, request.user_id
+        )
+        
+        return JSONResponse({
+            "status": "success",
+            "message": "Analysis shared successfully",
+            "analysis_id": analysis_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error sharing analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/collaboration/analysis/comment")
+async def add_comment(request: AddCommentRequest):
+    """Add a comment to a shared analysis"""
+    global collaboration_agent
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    try:
+        comment_id = collaboration_agent.add_comment_to_analysis(
+            request.workspace_id, request.analysis_id, request.user_id, request.comment
+        )
+        
+        if comment_id:
+            return JSONResponse({
+                "status": "success",
+                "message": "Comment added successfully",
+                "comment_id": comment_id
+            })
+        else:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+        
+    except Exception as e:
+        logger.error(f"Error adding comment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/collaboration/workspace/{workspace_id}/analyses")
+async def get_workspace_analyses(workspace_id: str):
+    """Get all shared analyses in a workspace"""
+    global collaboration_agent
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    try:
+        analyses = collaboration_agent.get_workspace_analyses(workspace_id)
+        
+        return JSONResponse({
+            "status": "success",
+            "analyses": analyses,
+            "count": len(analyses)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting workspace analyses: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/collaboration/workspace/{workspace_id}/activity")
+async def get_workspace_activity(workspace_id: str):
+    """Get activity log for a workspace"""
+    global collaboration_agent
+    
+    if collaboration_agent is None:
+        raise HTTPException(status_code=500, detail="Collaboration agent not initialized")
+    
+    try:
+        activity = collaboration_agent.get_workspace_activity_log(workspace_id)
+        
+        return JSONResponse({
+            "status": "success",
+            "activity": activity,
+            "count": len(activity)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting workspace activity: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ML Enhancement endpoints
+@app.post("/api/ml/query")
+async def process_nl_query(request: NLQueryRequest):
+    """Process natural language query on transaction data"""
+    global current_data, ml_enhancement_agent
+    
+    if current_data is None:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if ml_enhancement_agent is None:
+        raise HTTPException(status_code=500, detail="ML enhancement agent not initialized")
+    
+    try:
+        # Sample data for efficiency if requested
+        data_to_process = current_data
+        if request.sample_data and len(current_data) > 1000:
+            data_to_process = current_data.sample(n=1000, random_state=42)
+        
+        # Process natural language query
+        result_df = ml_enhancement_agent.natural_language_query(data_to_process, request.query)
+        
+        return JSONResponse({
+            "status": "success",
+            "query": request.query,
+            "result_count": len(result_df),
+            "sample_results": result_df.head(10).to_dict(orient='records') if len(result_df) > 0 else []
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing NL query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ml/train")
+async def train_enhanced_models(request: ModelTrainingRequest):
+    """Train enhanced ML models with ensemble methods"""
+    global current_data, ml_enhancement_agent, orchestrator
+    
+    if current_data is None:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if ml_enhancement_agent is None:
+        raise HTTPException(status_code=500, detail="ML enhancement agent not initialized")
+    
+    try:
+        # Use fraud predictions if available, otherwise use current data
+        train_data = current_data
+        if orchestrator and orchestrator.risk_agent and orchestrator.risk_agent.fraud_model:
+            # Get fraud predictions
+            try:
+                fraud_predictions = orchestrator.risk_agent.predict_fraud(current_data)
+                # Combine with original data
+                train_data = current_data.copy()
+                if 'is_fraud' in fraud_predictions.columns:
+                    train_data['is_fraud'] = fraud_predictions['is_fraud']
+            except Exception as e:
+                logger.warning(f"Could not get fraud predictions: {e}")
+        
+        # Train enhanced models
+        results = ml_enhancement_agent.train_enhanced_model(train_data, request.target_column)
+        
+        return JSONResponse({
+            "status": "success",
+            "message": "Enhanced ML models trained successfully",
+            "model_performance": results['model_performance'],
+            "top_features": dict(list(results['feature_importance'].items())[:10])
+        })
+        
+    except Exception as e:
+        logger.error(f"Error training enhanced models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/ml/insights")
+async def get_ml_insights():
+    """Get insights from trained ML models"""
+    global ml_enhancement_agent
+    
+    if ml_enhancement_agent is None:
+        raise HTTPException(status_code=500, detail="ML enhancement agent not initialized")
+    
+    try:
+        insights = ml_enhancement_agent.get_model_insights()
+        
+        return JSONResponse({
+            "status": "success",
+            "insights": insights
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting ML insights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ml/explain/{transaction_id}")
+async def explain_prediction(transaction_id: int):
+    """Explain why a transaction was flagged as high-risk"""
+    global current_data, ml_enhancement_agent
+    
+    if current_data is None:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if ml_enhancement_agent is None:
+        raise HTTPException(status_code=500, detail="ML enhancement agent not initialized")
+    
+    try:
+        # Find the transaction
+        transaction = current_data[current_data['transaction_id'] == transaction_id]
+        if len(transaction) == 0:
+            raise HTTPException(status_code=404, detail=f"Transaction {transaction_id} not found")
+        
+        # Get explanation
+        explanation = ml_enhancement_agent.explain_prediction(transaction.iloc[0])
+        
+        return JSONResponse({
+            "status": "success",
+            "explanation": explanation
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error explaining prediction: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Run the API
 if __name__ == "__main__":

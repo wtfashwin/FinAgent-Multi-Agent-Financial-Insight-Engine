@@ -63,3 +63,5 @@ accelerate>=0.24.0
 cohere
 
 rank-bm25
+
+plotly
