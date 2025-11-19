@@ -1,8 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import StandardScaler
+
+# Handle optional imports gracefully
+try:
+    from sklearn.ensemble import IsolationForest
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    IsolationForest = None
+    StandardScaler = None
+    st.error("Missing scikit-learn dependencies. Install with: `pip install scikit-learn`")
+
 import hashlib 
 
 try:
@@ -73,6 +83,11 @@ def load_data(uploaded_file):
     if uploaded_file is None:
         return None, None, None
     try:
+        # Check if required dependencies are available
+        if not SKLEARN_AVAILABLE:
+            st.error("scikit-learn is required for data processing but not installed.")
+            return None, None, None
+            
         df = pd.read_csv(uploaded_file)
         amount_column = None
         possible_amount_columns = ['Amount', 'amount', 'transaction_amount', 'txn_amount', 'value']
@@ -120,6 +135,10 @@ def load_data(uploaded_file):
 
 @st.cache_resource
 def train_risk_model(df):
+    if not SKLEARN_AVAILABLE:
+        st.error("scikit-learn is required for risk modeling but not installed.")
+        return None
+        
     if 'Class' in df.columns:
         features = df.drop(['Class'], axis=1, errors='ignore')
     else:
@@ -130,6 +149,14 @@ def train_risk_model(df):
     return model
 
 def run_risk_analysis(model, df):
+    if model is None:
+        st.error("Risk model is not available due to missing dependencies.")
+        # Return the dataframe with default values
+        df_copy = df.copy()
+        df_copy['anomaly_score'] = 0
+        df_copy['is_anomaly'] = False
+        return df_copy
+        
     df_copy = df.copy()
     features = df_copy.drop(['Class'], axis=1, errors='ignore')
     df_copy['anomaly_score'] = model.decision_function(features)
@@ -138,6 +165,9 @@ def run_risk_analysis(model, df):
     return df_copy
 
 def get_anomaly_summary(df):
+    if 'is_anomaly' not in df.columns:
+        return "Risk analysis is not available due to missing dependencies."
+        
     anomalies = df[df['is_anomaly']].sort_values(by='anomaly_score', ascending=True)
     if anomalies.empty:
         return "No anomalies detected in this batch based on the Isolation Forest model (contamination=0.01)."        
