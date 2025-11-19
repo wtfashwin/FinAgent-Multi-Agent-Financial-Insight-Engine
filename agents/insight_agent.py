@@ -3,15 +3,154 @@ Insight Agent: Runs LLM with Graph-RAG for contextual insights
 """
 import os
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import PromptTemplate
 import pandas as pd
+import numpy as np
+
+# Optional imports for hybrid search
+try:
+    from rank_bm25 import BM25Okapi
+    BM25_AVAILABLE = True
+except ImportError:
+    BM25_AVAILABLE = False
+    BM25Okapi = None
+
+# Optional imports for reranking
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    import torch
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    AutoTokenizer = None
+    AutoModelForSequenceClassification = None
+    torch = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class HybridRetriever:
+    """Hybrid retriever combining vector search and keyword search"""
+    
+    def __init__(self, vector_store, documents: List[str]):
+        self.vector_store = vector_store
+        self.documents = documents
+        self.bm25 = None
+        
+        # Initialize BM25 if available
+        if BM25_AVAILABLE:
+            tokenized_docs = [doc.split() for doc in documents]
+            self.bm25 = BM25Okapi(tokenized_docs)
+    
+    def hybrid_search(self, query: str, k: int = 10, alpha: float = 0.5) -> List[Tuple[str, float]]:
+        """
+        Perform hybrid search combining vector and keyword search
+        alpha: weight for vector search (1-alpha for keyword search)
+        """
+        results = []
+        
+        # Vector search
+        vector_results = self.vector_store.similarity_search_with_score(query, k=k*2)
+        vector_scores = {doc.page_content: score for doc, score in vector_results}
+        
+        # Keyword search if BM25 is available
+        keyword_scores = {}
+        if self.bm25 and BM25_AVAILABLE:
+            tokenized_query = query.split()
+            bm25_scores = self.bm25.get_scores(tokenized_query)
+            
+            # Map scores to documents
+            for i, doc in enumerate(self.documents):
+                keyword_scores[doc] = bm25_scores[i]
+        
+        # Combine scores
+        all_docs = set(list(vector_scores.keys()) + list(keyword_scores.keys()))
+        
+        for doc in all_docs:
+            vector_score = vector_scores.get(doc, 0.0)
+            keyword_score = keyword_scores.get(doc, 0.0)
+            
+            # Normalize scores (convert to similarities)
+            normalized_vector = 1.0 / (1.0 + vector_score) if vector_score > 0 else 0.0
+            normalized_keyword = keyword_score
+            
+            # Combine with weights
+            combined_score = alpha * normalized_vector + (1 - alpha) * normalized_keyword
+            results.append((doc, combined_score))
+        
+        # Sort by combined score
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:k]
+
+
+class Reranker:
+    """Reranker using Cross-Encoder models"""
+    
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+        self.model_name = model_name
+        self.tokenizer = None
+        self.model = None
+        self.device = None
+        
+        if TRANSFORMERS_AVAILABLE:
+            try:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+                self.model.to(self.device)
+                self.model.eval()
+                logger.info(f"✓ Reranker model {model_name} loaded")
+            except Exception as e:
+                logger.warning(f"Could not load reranker model: {e}")
+                self.model = None
+    
+    def rerank(self, query: str, documents: List[str], k: int = 10) -> List[Tuple[str, float]]:
+        """
+        Rerank documents using Cross-Encoder
+        Returns top k documents with scores
+        """
+        if not self.model or not TRANSFORMERS_AVAILABLE:
+            # Return original documents with dummy scores
+            return [(doc, 1.0) for doc in documents[:k]]
+        
+        try:
+            # Prepare inputs
+            inputs = []
+            for doc in documents:
+                inputs.append((query, doc))
+            
+            # Tokenize
+            encoded_inputs = self.tokenizer(
+                inputs,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+                max_length=512
+            )
+            
+            # Move to device
+            encoded_inputs = {k: v.to(self.device) for k, v in encoded_inputs.items()}
+            
+            # Get predictions
+            with torch.no_grad():
+                outputs = self.model(**encoded_inputs)
+                scores = torch.sigmoid(outputs.logits).cpu().numpy().flatten()
+            
+            # Combine documents with scores
+            doc_scores = list(zip(documents, scores))
+            doc_scores.sort(key=lambda x: x[1], reverse=True)
+            
+            return doc_scores[:k]
+            
+        except Exception as e:
+            logger.warning(f"Reranking failed: {e}")
+            # Return original documents with dummy scores
+            return [(doc, 1.0) for doc in documents[:k]]
 
 
 class InsightAgent:
@@ -34,6 +173,9 @@ class InsightAgent:
         self.vector_store = None
         self.qa_chain = None
         self.llm = None
+        self.documents = []  # Store original documents for hybrid search
+        self.hybrid_retriever = None
+        self.reranker = Reranker() if TRANSFORMERS_AVAILABLE else None
         
     def _init_llm(self):
         """Initialize LLM based on configured provider"""
@@ -109,6 +251,9 @@ class InsightAgent:
             
             documents.append(text)
         
+        # Store documents for hybrid search
+        self.documents = documents
+        
         # Split into chunks
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.CHUNK_SIZE,
@@ -126,6 +271,10 @@ class InsightAgent:
             persist_directory=str(self.config.CHROMA_DB_PATH),
             collection_name=self.config.CHROMA_COLLECTION_NAME
         )
+        
+        # Initialize hybrid retriever
+        if BM25_AVAILABLE:
+            self.hybrid_retriever = HybridRetriever(self.vector_store, self.documents)
         
         logger.info("✓ Data ingestion complete")
         
@@ -199,22 +348,93 @@ Answer:"""
         
         logger.info("✓ QA chain setup complete")
     
+    def _hybrid_search_with_reranking(self, query: str, k: int = 5) -> List[Tuple[str, float]]:
+        """
+        Perform hybrid search with reranking
+        Returns top k documents with scores
+        """
+        if not self.hybrid_retriever:
+            # Fallback to regular vector search
+            results = self.vector_store.similarity_search_with_score(query, k=k)
+            return [(doc.page_content, score) for doc, score in results]
+        
+        # Step 1: Hybrid search (get more results for reranking)
+        hybrid_results = self.hybrid_retriever.hybrid_search(query, k=k*10, alpha=0.7)
+        
+        # Step 2: Rerank top results
+        if self.reranker:
+            documents = [doc for doc, _ in hybrid_results]
+            reranked_results = self.reranker.rerank(query, documents, k=k)
+            return reranked_results
+        else:
+            # Return top k hybrid results
+            return hybrid_results[:k]
+    
     def generate_insights(self, query: str) -> Dict:
-        """Generate insights based on a query"""
+        """Generate insights based on a query with hybrid search and reranking"""
         if self.qa_chain is None:
             self.setup_qa_chain()
         
         logger.info(f"Generating insights for: {query}")
         
         try:
-            # Use the correct method for RetrievalQA
-            result = self.qa_chain({"query": query})
-            
-            insights = {
-                'query': query,
-                'answer': result['result'],
-                'source_documents': [doc.page_content for doc in result.get('source_documents', [])]
-            }
+            # Use hybrid search with reranking for better results
+            if self.hybrid_retriever:
+                # Get relevant documents using hybrid search + reranking
+                relevant_docs = self._hybrid_search_with_reranking(query, k=5)
+                context = "\n\n".join([doc for doc, _ in relevant_docs])
+                
+                # Generate answer with context
+                prompt = f"""You are a financial analyst AI assistant specialized in analyzing credit card transactions.
+
+Use the following context to answer the question. Be specific, data-driven, and provide actionable insights.
+
+Context: {context}
+
+Question: {query}
+
+Provide a detailed analysis with:
+1. Key findings from the data
+2. Patterns or trends identified
+3. Risk assessment if applicable
+4. Actionable recommendations
+
+Answer:"""
+                
+                # Get LLM response
+                llm_response = self.llm.invoke(prompt)
+                
+                # Extract answer (handle different response formats)
+                if hasattr(llm_response, 'content'):
+                    answer = llm_response.content
+                elif isinstance(llm_response, dict) and 'result' in llm_response:
+                    answer = llm_response['result']
+                else:
+                    answer = str(llm_response)
+                
+                # Include source information for explainable RAG
+                source_documents = []
+                for doc, score in relevant_docs:
+                    source_documents.append({
+                        'content': doc,
+                        'relevance_score': float(score),
+                        'source_id': hash(doc) % 10000  # Simple ID generation
+                    })
+                
+                insights = {
+                    'query': query,
+                    'answer': answer,
+                    'source_documents': source_documents
+                }
+            else:
+                # Fallback to original method
+                result = self.qa_chain({"query": query})
+                
+                insights = {
+                    'query': query,
+                    'answer': result['result'],
+                    'source_documents': [doc.page_content for doc in result.get('source_documents', [])]
+                }
             
             logger.info("✓ Insights generated")
             return insights
