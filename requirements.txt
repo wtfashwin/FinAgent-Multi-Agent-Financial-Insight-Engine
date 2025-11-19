@@ -51,3 +51,4 @@ shap
 langchain-groq>=0.1.0
 
 fastembed>=0.5.0
+plotly
