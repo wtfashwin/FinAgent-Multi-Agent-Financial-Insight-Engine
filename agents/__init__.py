@@ -1,0 +1,3 @@
+"""
+FinAgent agents package
+"""
