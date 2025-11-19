@@ -7,13 +7,12 @@ try:
     from sklearn.ensemble import IsolationForest
     from sklearn.preprocessing import StandardScaler
     SKLEARN_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     SKLEARN_AVAILABLE = False
     IsolationForest = None
     StandardScaler = None
-    st.error("Missing scikit-learn dependencies. Install with: `pip install scikit-learn`")
-
-import hashlib 
+    # Only show error in debug mode to avoid confusing users
+    # st.error(f"Missing scikit-learn dependencies: {e}")
 
 try:
     from langchain_groq import ChatGroq
@@ -23,7 +22,7 @@ try:
     from langchain_core.runnables import RunnablePassthrough
     from langchain_core.output_parsers import StrOutputParser
     LANGCHAIN_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     LANGCHAIN_AVAILABLE = False
     ChatGroq = None
     FastEmbedEmbeddings = None
@@ -31,7 +30,10 @@ except ImportError:
     ChatPromptTemplate = None
     RunnablePassthrough = None
     StrOutputParser = None
-    st.error("Missing RAG dependencies. Install with: `pip install langchain-groq fastembed python-dotenv`")
+    # Only show error in debug mode to avoid confusing users
+    # st.error(f"Missing RAG dependencies: {e}")
+
+import hashlib 
 
 st.set_page_config(
     page_title="FinAgent",
