@@ -11,7 +11,6 @@ from langchain_core.prompts import PromptTemplate
 import pandas as pd
 import numpy as np
 
-# Optional imports for hybrid search
 try:
     from rank_bm25 import BM25Okapi
     BM25_AVAILABLE = True
@@ -19,7 +18,6 @@ except ImportError:
     BM25_AVAILABLE = False
     BM25Okapi = None
 
-# Optional imports for reranking
 try:
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
     import torch
@@ -160,16 +158,13 @@ class InsightAgent:
         from config import Config
         self.config = config or Config
         
-        # Initialize embeddings (free local model)
         logger.info("Initializing embeddings...")
         try:
-            # Skip actual embedding initialization for testing
             self.embeddings = None
         except Exception as e:
             logger.error(f"Error initializing embeddings: {e}")
             self.embeddings = None
         
-        # Initialize vector store
         self.vector_store = None
         self.qa_chain = None
         self.llm = None

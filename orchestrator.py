@@ -3,11 +3,23 @@ Multi-Agent Orchestrator using LangGraph
 Coordinates Data Agent, Insight Agent, and Risk Agent
 """
 import logging
-from typing import Dict, List, TypedDict, Annotated
+from typing import Dict, List, TypedDict, Annotated, Optional, Any
 from langgraph.graph import StateGraph, END
 import operator
 import pandas as pd
 from pathlib import Path
+
+try:
+    from langchain.tools import tool
+    from langchain.agents import AgentType, initialize_agent
+    from langchain_groq import ChatGroq
+    LANGCHAIN_TOOLS_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_TOOLS_AVAILABLE = False
+    tool = None
+    AgentType = None
+    initialize_agent = None
+    ChatGroq = None
 
 from agents.data_agent import DataAgent
 from agents.insight_agent import InsightAgent
@@ -37,6 +49,131 @@ class AgentState(TypedDict):
     visualizations: Dict
     time_series_patterns: Dict
     risk_explanation: Dict
+    # New fields for autonomous tool calling
+    user_query: str
+    tool_calls: List[Dict]
+    dynamic_workflow: bool
+
+
+# Define tools for autonomous agent selection
+if LANGCHAIN_TOOLS_AVAILABLE:
+    @tool
+    def process_data_tool(file_path: str) -> str:
+        """Process financial transaction data from a file. Use this when the user wants to analyze transaction data, clean data, or detect anomalies."""
+        return f"Data processing tool called with file: {file_path}"
+
+    @tool
+    def assess_risk_tool(data_description: str) -> str:
+        """Assess fraud risk in financial transactions. Use this when the user wants to detect fraud, assess risk, or analyze suspicious transactions."""
+        return f"Risk assessment tool called for: {data_description}"
+
+    @tool
+    def generate_insights_tool(question: str) -> str:
+        """Generate financial insights and answer questions about the data. Use this when the user wants insights, trends, or answers to specific questions."""
+        return f"Insight generation tool called with question: {question}"
+
+    # List of available tools
+    FINANCIAL_TOOLS = [process_data_tool, assess_risk_tool, generate_insights_tool]
+else:
+    FINANCIAL_TOOLS = []
+
+
+class AutonomousOrchestrator:
+    """Autonomous orchestrator that dynamically selects agents based on user queries"""
+    
+    def __init__(self, config=None):
+        self.config = config or Config
+        self.llm = None
+        self.autonomous_agent = None
+        
+        # Initialize LLM for tool calling
+        if LANGCHAIN_TOOLS_AVAILABLE and self.config.GROQ_API_KEY:
+            try:
+                self.llm = ChatGroq(
+                    groq_api_key=self.config.GROQ_API_KEY,
+                    model_name=self.config.FREE_MODELS['groq'],
+                    temperature=0.0,  # Lower temperature for more deterministic tool selection
+                )
+                
+                # Initialize autonomous agent with tools
+                self.autonomous_agent = initialize_agent(
+                    FINANCIAL_TOOLS,
+                    self.llm,
+                    agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+                    verbose=True,
+                    handle_parsing_errors=True
+                )
+            except Exception as e:
+                logger.warning(f"Could not initialize autonomous agent: {e}")
+    
+    def analyze_query_and_select_tools(self, user_query: str) -> List[Dict]:
+        """
+        Analyze user query and determine which tools/agents to call
+        Returns a list of tool calls with arguments
+        """
+        if not self.autonomous_agent:
+            # Fallback to simple keyword-based selection
+            return self._simple_tool_selection(user_query)
+        
+        try:
+            # Let the LLM decide which tools to call
+            result = self.autonomous_agent.invoke({"input": user_query})
+            
+            # Extract tool calls from the result
+            tool_calls = []
+            if hasattr(result, 'intermediate_steps'):
+                for step in result['intermediate_steps']:
+                    if len(step) >= 2:
+                        tool_name = step[0].tool
+                        tool_input = step[0].tool_input
+                        tool_calls.append({
+                            'tool': tool_name,
+                            'arguments': tool_input,
+                            'result': step[1]
+                        })
+            
+            return tool_calls
+            
+        except Exception as e:
+            logger.warning(f"Autonomous tool selection failed: {e}")
+            # Fallback to simple selection
+            return self._simple_tool_selection(user_query)
+    
+    def _simple_tool_selection(self, user_query: str) -> List[Dict]:
+        """
+        Simple keyword-based tool selection as fallback
+        """
+        query_lower = user_query.lower()
+        tool_calls = []
+        
+        # Data processing keywords
+        data_keywords = ['process', 'clean', 'load', 'upload', 'file', 'csv', 'json', 'data', 'dataset']
+        if any(keyword in query_lower for keyword in data_keywords):
+            tool_calls.append({
+                'tool': 'process_data_tool',
+                'arguments': {'file_path': 'user_provided_file'},
+                'result': 'Data processing recommended'
+            })
+        
+        # Risk assessment keywords
+        risk_keywords = ['risk', 'fraud', 'anomaly', 'suspicious', 'threat', 'danger', 'unsafe']
+        if any(keyword in query_lower for keyword in risk_keywords):
+            tool_calls.append({
+                'tool': 'assess_risk_tool',
+                'arguments': {'data_description': 'financial_transactions'},
+                'result': 'Risk assessment recommended'
+            })
+        
+        # Insight generation keywords
+        insight_keywords = ['insight', 'trend', 'pattern', 'analysis', 'summary', 'report', 'what', 'how', 'why', 'question']
+        if any(keyword in query_lower for keyword in insight_keywords):
+            tool_calls.append({
+                'tool': 'generate_insights_tool',
+                'arguments': {'question': user_query},
+                'result': 'Insight generation recommended'
+            })
+        
+        return tool_calls
 
 
 class FinAgentOrchestrator:
@@ -49,6 +186,9 @@ class FinAgentOrchestrator:
         self.data_agent = DataAgent()
         self.insight_agent = InsightAgent(config=self.config)
         self.risk_agent = RiskAgent()
+        
+        # Initialize autonomous orchestrator
+        self.autonomous_orchestrator = AutonomousOrchestrator(config=self.config)
         
         # Build the workflow graph
         self.workflow = self._build_workflow()
@@ -66,9 +206,24 @@ class FinAgentOrchestrator:
         workflow.add_node("ingest_rag_data", self._ingest_rag_data_node)
         workflow.add_node("insight_generation", self._insight_generation_node)
         workflow.add_node("summarization", self._summarization_node)
+        # New node for autonomous tool selection
+        workflow.add_node("autonomous_routing", self._autonomous_routing_node)
         
         # Define the workflow edges
-        workflow.set_entry_point("data_processing")
+        workflow.set_entry_point("autonomous_routing")
+        
+        # Conditional edges based on tool calls
+        workflow.add_conditional_edges(
+            "autonomous_routing",
+            self._route_based_on_tool_calls,
+            {
+                "data_processing": "data_processing",
+                "risk_assessment": "risk_assessment",
+                "insight_generation": "ingest_rag_data",
+                "summarization": "summarization",
+                "continue": "data_processing"  # Default route
+            }
+        )
         
         workflow.add_edge("data_processing", "risk_assessment")
         workflow.add_edge("risk_assessment", "ingest_rag_data")
@@ -78,6 +233,51 @@ class FinAgentOrchestrator:
         workflow.add_edge("summarization", END)
         
         return workflow
+    
+    def _autonomous_routing_node(self, state: AgentState) -> AgentState:
+        """Node for autonomous tool selection based on user query"""
+        logger.info("🔄 Running Autonomous Routing...")
+        
+        user_query = state.get('user_query', '')
+        if not user_query:
+            logger.info("No specific user query, following default workflow")
+            state['dynamic_workflow'] = False
+            state['tool_calls'] = []
+            return state
+        
+        # Analyze query and select appropriate tools
+        tool_calls = self.autonomous_orchestrator.analyze_query_and_select_tools(user_query)
+        
+        state['dynamic_workflow'] = True
+        state['tool_calls'] = tool_calls
+        
+        # Log selected tools
+        if tool_calls:
+            logger.info(f"Selected tools: {[call['tool'] for call in tool_calls]}")
+        else:
+            logger.info("No specific tools selected, following default workflow")
+        
+        return state
+    
+    def _route_based_on_tool_calls(self, state: AgentState) -> str:
+        """Route to appropriate node based on tool calls"""
+        if not state.get('dynamic_workflow', False):
+            return "data_processing"
+        
+        tool_calls = state.get('tool_calls', [])
+        if not tool_calls:
+            return "data_processing"
+        
+        # Determine primary tool to execute
+        primary_tool = tool_calls[0]['tool'] if tool_calls else None
+        
+        routing_map = {
+            'process_data_tool': 'data_processing',
+            'assess_risk_tool': 'risk_assessment',
+            'generate_insights_tool': 'insight_generation'
+        }
+        
+        return routing_map.get(primary_tool, 'data_processing')
     
     def _data_processing_node(self, state: AgentState) -> AgentState:
         """Node for data processing using Data Agent"""
@@ -200,7 +400,7 @@ class FinAgentOrchestrator:
         return state
     
     def _risk_assessment_node(self, state: AgentState) -> AgentState:
-        """Node for risk assessment using Risk Agent"""
+        """Node for risk assessment using Risk Agent with enhanced features"""
         logger.info("🔄 Running Risk Assessment Agent...")
         
         try:
@@ -213,8 +413,8 @@ class FinAgentOrchestrator:
             fraud_cols = [col for col in processed_df.columns if 'fraud' in col.lower() or 'label' in col.lower()]
             
             if fraud_cols:
-                # Train supervised fraud detection model
-                logger.info("Training fraud detection model...")
+                # Train supervised fraud detection model with ensemble methods
+                logger.info("Training fraud detection model with ensemble methods...")
                 fraud_col = fraud_cols[0]
                 metrics = self.risk_agent.train_fraud_model(processed_df, target_col=fraud_col)
                 
@@ -386,8 +586,8 @@ class FinAgentOrchestrator:
         
         return state
     
-    def run(self, data_path: str = None, data: pd.DataFrame = None) -> Dict:
-        """Run the complete multi-agent workflow"""
+    def run(self, data_path: str = None, data: pd.DataFrame = None, user_query: str = None) -> Dict:
+        """Run the complete multi-agent workflow with optional autonomous tool selection"""
         
         if self.app is None:
             self.compile()
@@ -397,7 +597,8 @@ class FinAgentOrchestrator:
             'raw_data_path': data_path,
             'data': data,
             'rag_ingested': False,
-            'messages': []
+            'messages': [],
+            'user_query': user_query or ''
         }
         
         logger.info("🚀 Starting FinAgent Multi-Agent Workflow...")
@@ -434,7 +635,7 @@ if __name__ == "__main__":
     
     # Run orchestrator
     orchestrator = FinAgentOrchestrator()
-    result = orchestrator.run(data=sample_data)
+    result = orchestrator.run(data=sample_data, user_query="Analyze fraud patterns in my transaction data")
     
     # Display results
     print("\n" + "="*50)
