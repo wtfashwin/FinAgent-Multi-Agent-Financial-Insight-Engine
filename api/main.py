@@ -4,7 +4,7 @@ Provides REST API endpoints for agent interactions
 """
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 import pandas as pd
@@ -13,6 +13,9 @@ import io
 import logging
 from pathlib import Path
 import sys
+import asyncio
+import json
+from datetime import datetime
 # from contextlib import asynccontextmanager 
 sys.path.append(str(Path(__file__).parent.parent)) 
 
@@ -44,7 +47,8 @@ app.add_middleware(
 # Global state for agents (in production, use proper state management)
 orchestrator = None
 current_data = None
-
+streaming_task = None
+streaming_queue = asyncio.Queue()
 
 # Pydantic models for requests/responses
 class AnalysisRequest(BaseModel):
@@ -67,6 +71,12 @@ class AnalysisResponse(BaseModel):
     insights: Optional[Dict] = None
     risk_assessment: Optional[Dict] = None
     statistics: Optional[Dict] = None
+
+
+class TransactionStream(BaseModel):
+    transaction: Dict
+    risk_score: float
+    timestamp: str
 
 
 @app.on_event("startup")
@@ -93,7 +103,8 @@ async def root():
             "analyze": "/api/analyze",
             "insights": "/api/insights",
             "risk": "/api/risk",
-            "statistics": "/api/statistics"
+            "statistics": "/api/statistics",
+            "streaming": "/api/stream/start"
         }
     }
 
@@ -328,6 +339,186 @@ async def get_sample_data(n: int = 10):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Real-time streaming endpoints
+@app.post("/api/stream/start")
+async def start_streaming():
+    """Start real-time transaction monitoring"""
+    global orchestrator, streaming_task
+    
+    if orchestrator is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+    
+    try:
+        # Start streaming in background
+        if streaming_task is None or streaming_task.done():
+            streaming_task = asyncio.create_task(_stream_transactions())
+            logger.info("✓ Real-time streaming started")
+        
+        return JSONResponse({
+            "status": "success",
+            "message": "Real-time transaction monitoring started"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error starting streaming: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/stream/stop")
+async def stop_streaming():
+    """Stop real-time transaction monitoring"""
+    global streaming_task
+    
+    try:
+        if streaming_task and not streaming_task.done():
+            streaming_task.cancel()
+            logger.info("✓ Real-time streaming stopped")
+        
+        return JSONResponse({
+            "status": "success",
+            "message": "Real-time transaction monitoring stopped"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error stopping streaming: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/stream/status")
+async def get_streaming_status():
+    """Get real-time streaming status"""
+    global streaming_task
+    
+    status = "inactive"
+    if streaming_task:
+        if not streaming_task.done():
+            status = "active"
+        else:
+            status = "stopped"
+    
+    return JSONResponse({
+        "status": "success",
+        "streaming_status": status,
+        "queue_size": streaming_queue.qsize()
+    })
+
+
+async def _stream_transactions():
+    """Background task to simulate transaction streaming"""
+    global orchestrator, streaming_queue
+    
+    try:
+        # Simulate transaction stream
+        merchants = ['Amazon', 'Walmart', 'Target', 'Starbucks', 'Shell', 'Casino']
+        categories = ['Online', 'Retail', 'Food', 'Gas', 'Gambling']
+        
+        transaction_id = 0
+        while True:
+            # Generate a mock transaction
+            transaction = {
+                'transaction_id': transaction_id,
+                'amount': float(pd.np.random.exponential(50)),
+                'merchant': pd.np.random.choice(merchants),
+                'category': pd.np.random.choice(categories),
+                'hour': int(pd.np.random.randint(0, 24)),
+                'day_of_week': int(pd.np.random.randint(0, 7))
+            }
+            
+            # Occasionally create high-risk transactions
+            if pd.np.random.random() < 0.05:
+                transaction['amount'] = float(pd.np.random.exponential(5000))
+                transaction['merchant'] = 'Casino'
+                transaction['category'] = 'Gambling'
+                transaction['hour'] = int(pd.np.random.choice([2, 3, 4, 5]))
+            
+            # Assess risk using the risk agent if available
+            risk_score = 0.1  # Default low risk
+            if orchestrator and orchestrator.risk_agent and orchestrator.risk_agent.fraud_model:
+                try:
+                    df = pd.DataFrame([transaction])
+                    risk_score = float(orchestrator.risk_agent.fraud_model.predict_proba(df)[0][1])
+                except Exception as e:
+                    logger.warning(f"Error assessing risk for streaming transaction: {e}")
+                    # Fallback to heuristic scoring
+                    risk_score = _heuristic_risk_score(transaction)
+            else:
+                # Fallback to heuristic scoring
+                risk_score = _heuristic_risk_score(transaction)
+            
+            # Create stream item
+            stream_item = TransactionStream(
+                transaction=transaction,
+                risk_score=risk_score,
+                timestamp=datetime.now().isoformat()
+            )
+            
+            # Add to queue
+            await streaming_queue.put(stream_item)
+            
+            transaction_id += 1
+            await asyncio.sleep(0.1)  # Simulate real-time arrival
+            
+    except asyncio.CancelledError:
+        logger.info("Streaming task cancelled")
+    except Exception as e:
+        logger.error(f"Error in streaming task: {e}")
+
+
+def _heuristic_risk_score(transaction: Dict) -> float:
+    """
+    Simple heuristic-based risk scoring for streaming transactions
+    """
+    risk_score = 0.0
+    
+    # Amount-based risk
+    amount = transaction.get('amount', 0)
+    if amount > 10000:
+        risk_score += 0.4
+    elif amount > 5000:
+        risk_score += 0.2
+    elif amount > 1000:
+        risk_score += 0.1
+        
+    # Time-based risk (unusual hours)
+    hour = transaction.get('hour', 12)
+    if hour < 6 or hour > 22:
+        risk_score += 0.2
+        
+    # Merchant-based risk (if we have a list of high-risk merchants)
+    high_risk_merchants = ['casino', 'gambling', 'adult']
+    merchant = str(transaction.get('merchant', '')).lower()
+    if any(risky in merchant for risky in high_risk_merchants):
+        risk_score += 0.3
+        
+    # Category-based risk
+    high_risk_categories = ['cash', 'gambling', 'adult']
+    category = str(transaction.get('category', '')).lower()
+    if any(risky in category for risky in high_risk_categories):
+        risk_score += 0.2
+        
+    # Ensure score is between 0 and 1
+    return min(1.0, max(0.0, risk_score))
+
+
+@app.get("/api/stream/events")
+async def stream_events():
+    """Stream real-time transaction events"""
+    async def event_generator():
+        while True:
+            try:
+                # Wait for next item in queue
+                item = await asyncio.wait_for(streaming_queue.get(), timeout=1.0)
+                yield f"data: {json.dumps(item.dict())}\n\n"
+            except asyncio.TimeoutError:
+                # Send keep-alive
+                yield f"data: {json.dumps({'type': 'keepalive', 'timestamp': datetime.now().isoformat()})}\n\n"
+            except Exception as e:
+                logger.error(f"Error in event stream: {e}")
+                break
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # Run the API

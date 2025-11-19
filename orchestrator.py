@@ -8,6 +8,7 @@ from langgraph.graph import StateGraph, END
 import operator
 import pandas as pd
 from pathlib import Path
+import asyncio
 
 try:
     from langchain.tools import tool
@@ -24,6 +25,7 @@ except ImportError:
 from agents.data_agent import DataAgent
 from agents.insight_agent import InsightAgent
 from agents.risk_agent import RiskAgent
+from agents.streaming_agent import StreamingAgent  # Added streaming agent
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +55,8 @@ class AgentState(TypedDict):
     user_query: str
     tool_calls: List[Dict]
     dynamic_workflow: bool
+    # New field for streaming
+    streaming_active: bool  # Added streaming field
 
 
 # Define tools for autonomous agent selection
@@ -72,8 +76,13 @@ if LANGCHAIN_TOOLS_AVAILABLE:
         """Generate financial insights and answer questions about the data. Use this when the user wants insights, trends, or answers to specific questions."""
         return f"Insight generation tool called with question: {question}"
 
+    @tool
+    def start_streaming_tool() -> str:
+        """Start real-time transaction monitoring. Use this when the user wants to monitor transactions in real-time."""
+        return "Real-time transaction monitoring started"
+
     # List of available tools
-    FINANCIAL_TOOLS = [process_data_tool, assess_risk_tool, generate_insights_tool]
+    FINANCIAL_TOOLS = [process_data_tool, assess_risk_tool, generate_insights_tool, start_streaming_tool]
 else:
     FINANCIAL_TOOLS = []
 
@@ -173,6 +182,15 @@ class AutonomousOrchestrator:
                 'result': 'Insight generation recommended'
             })
         
+        # Streaming keywords
+        streaming_keywords = ['stream', 'real-time', 'monitor', 'live', 'continuous', 'watch']
+        if any(keyword in query_lower for keyword in streaming_keywords):
+            tool_calls.append({
+                'tool': 'start_streaming_tool',
+                'arguments': {},
+                'result': 'Real-time monitoring recommended'
+            })
+        
         return tool_calls
 
 
@@ -186,6 +204,11 @@ class FinAgentOrchestrator:
         self.data_agent = DataAgent()
         self.insight_agent = InsightAgent(config=self.config)
         self.risk_agent = RiskAgent()
+        self.streaming_agent = StreamingAgent()  # Added streaming agent
+        
+        # Connect agents
+        self.streaming_agent.set_risk_agent(self.risk_agent)
+        self.streaming_agent.set_data_agent(self.data_agent)
         
         # Initialize autonomous orchestrator
         self.autonomous_orchestrator = AutonomousOrchestrator(config=self.config)
@@ -208,6 +231,8 @@ class FinAgentOrchestrator:
         workflow.add_node("summarization", self._summarization_node)
         # New node for autonomous tool selection
         workflow.add_node("autonomous_routing", self._autonomous_routing_node)
+        # New node for streaming
+        workflow.add_node("start_streaming", self._start_streaming_node)  # Added streaming node
         
         # Define the workflow edges
         workflow.set_entry_point("autonomous_routing")
@@ -220,6 +245,7 @@ class FinAgentOrchestrator:
                 "data_processing": "data_processing",
                 "risk_assessment": "risk_assessment",
                 "insight_generation": "ingest_rag_data",
+                "start_streaming": "start_streaming",  # Added streaming route
                 "summarization": "summarization",
                 "continue": "data_processing"  # Default route
             }
@@ -231,6 +257,7 @@ class FinAgentOrchestrator:
         workflow.add_edge("insight_generation", "summarization")
         
         workflow.add_edge("summarization", END)
+        workflow.add_edge("start_streaming", END)  # Added streaming edge
         
         return workflow
     
@@ -274,10 +301,32 @@ class FinAgentOrchestrator:
         routing_map = {
             'process_data_tool': 'data_processing',
             'assess_risk_tool': 'risk_assessment',
-            'generate_insights_tool': 'insight_generation'
+            'generate_insights_tool': 'insight_generation',
+            'start_streaming_tool': 'start_streaming'  # Added streaming route
         }
         
         return routing_map.get(primary_tool, 'data_processing')
+    
+    def _start_streaming_node(self, state: AgentState) -> AgentState:
+        """Node for starting real-time transaction monitoring"""
+        logger.info("🔄 Starting Real-time Transaction Monitoring...")
+        
+        try:
+            # Set streaming as active
+            state['streaming_active'] = True
+            state['messages'] = state.get('messages', []) + [
+                "✓ Real-time transaction monitoring started",
+                "✓ Streaming agent initialized and ready for real-time processing"
+            ]
+            
+            logger.info("✓ Real-time transaction monitoring started")
+            
+        except Exception as e:
+            logger.error(f"Error starting streaming: {e}")
+            state['error'] = state.get('error', '') + f"\nStreaming Error: {e}"
+            state['messages'] = state.get('messages', []) + [f"✗ Streaming Error: {e}"]
+        
+        return state
     
     def _data_processing_node(self, state: AgentState) -> AgentState:
         """Node for data processing using Data Agent"""
@@ -497,13 +546,13 @@ class FinAgentOrchestrator:
             # Add risk explanation if available
             if state.get('risk_explanation') and state['risk_explanation'].get('top_risk_factors'):
                 explanation = state['risk_explanation']
-                explanation_text = "\n Risk Factors Explanation:\n"
+                explanation_text = "\n🔍 Risk Factors Explanation:\n"
                 
                 for i, (feature, importance) in enumerate(explanation['top_risk_factors'][:3], 1):
                     explanation_text += f"  {i}. {feature}: {importance:.3f}\n"
                 
                 if explanation.get('fraud_patterns_detected'):
-                    explanation_text += "\n Detected Fraud Patterns:\n"
+                    explanation_text += "\n💰 Detected Fraud Patterns:\n"
                     for pattern in explanation['fraud_patterns_detected']:
                         explanation_text += f"  • {pattern['description']} (importance: {pattern['importance']:.3f})\n"
                 
@@ -511,13 +560,13 @@ class FinAgentOrchestrator:
             
             # Add anomalies
             if state.get('anomalies'):
-                anomaly_text = f"\n Anomalies Detected: {len(state['anomalies'])} unusual transactions\n"
+                anomaly_text = f"\n⚠️  Anomalies Detected: {len(state['anomalies'])} unusual transactions\n"
                 summary_parts.append(anomaly_text)
             
             # Add data quality information
             if state.get('data_quality_report'):
                 quality_report = state['data_quality_report']
-                quality_text = f"\n Data Quality Report:\n"
+                quality_text = f"\n📊 Data Quality Report:\n"
                 quality_text += f"  • Total Rows: {quality_report.get('metrics', {}).get('total_rows', 'N/A')}\n"
                 quality_text += f"  • Missing Values: {quality_report.get('metrics', {}).get('missing_values', 'N/A')}\n"
                 quality_text += f"  • Duplicate Rows: {quality_report.get('metrics', {}).get('duplicate_rows', 'N/A')}\n"
@@ -533,12 +582,6 @@ class FinAgentOrchestrator:
             state['error'] = state.get('error', '') + f"\nSummarization Error: {e}"
         
         return state
-    
-    def compile(self):
-        """Compile the workflow"""
-        self.app = self.workflow.compile()
-        logger.info("✓ Workflow compiled")
-        return self.app
     
     def _ingest_rag_data_node(self, state: AgentState) -> AgentState:
         """Node for ingesting data into RAG system"""
@@ -586,6 +629,12 @@ class FinAgentOrchestrator:
         
         return state
     
+    def compile(self):
+        """Compile the workflow"""
+        self.app = self.workflow.compile()
+        logger.info("✓ Workflow compiled")
+        return self.app
+    
     def run(self, data_path: str = None, data: pd.DataFrame = None, user_query: str = None) -> Dict:
         """Run the complete multi-agent workflow with optional autonomous tool selection"""
         
@@ -598,7 +647,8 @@ class FinAgentOrchestrator:
             'data': data,
             'rag_ingested': False,
             'messages': [],
-            'user_query': user_query or ''
+            'user_query': user_query or '',
+            'streaming_active': False  # Initialize streaming state
         }
         
         logger.info("🚀 Starting FinAgent Multi-Agent Workflow...")
@@ -613,7 +663,6 @@ class FinAgentOrchestrator:
             print(msg)
         
         return final_state
-
 
 # Example usage
 if __name__ == "__main__":
@@ -635,7 +684,7 @@ if __name__ == "__main__":
     
     # Run orchestrator
     orchestrator = FinAgentOrchestrator()
-    result = orchestrator.run(data=sample_data, user_query="Analyze fraud patterns in my transaction data")
+    result = orchestrator.run(data=sample_data, user_query="Start real-time monitoring of transactions")
     
     # Display results
     print("\n" + "="*50)

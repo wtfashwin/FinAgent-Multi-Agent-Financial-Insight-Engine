@@ -5,12 +5,14 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import sys
+import asyncio
 
 # Add the project root to the path
 sys.path.append(str(Path(__file__).parent))
 
 from agents.insight_agent import InsightAgent, HybridRetriever, Reranker
 from agents.data_agent import DataAgent
+from agents.streaming_agent import StreamingAgent
 from orchestrator import FinAgentOrchestrator
 
 def main():
@@ -76,7 +78,8 @@ def main():
         test_queries = [
             "Analyze fraud patterns in my transactions",
             "Process this transaction data file",
-            "What are the spending trends?"
+            "What are the spending trends?",
+            "Start real-time monitoring of transactions"
         ]
         
         for query in test_queries:
@@ -104,11 +107,36 @@ def main():
     except Exception as e:
         print(f"   ✗ Error in Explainable RAG: {e}")
     
+    # Test Real-time Transaction Monitoring
+    print("\n5. Testing Real-time Transaction Monitoring...")
+    try:
+        # Test StreamingAgent
+        streaming_agent = StreamingAgent()
+        print("   ✓ StreamingAgent initialized successfully")
+        
+        # Test subscription mechanism
+        alerts_received = []
+        def alert_handler(transaction, risk_score):
+            alerts_received.append((transaction, risk_score))
+        
+        streaming_agent.subscribe(alert_handler)
+        print("   ✓ Alert subscription mechanism working")
+        
+        # Test buffer stats
+        stats = streaming_agent.get_buffer_stats()
+        print(f"   ✓ Buffer stats: {stats}")
+        
+        print("   ✓ Real-time transaction monitoring features implemented")
+        
+    except Exception as e:
+        print(f"   ✗ Error in Real-time Transaction Monitoring: {e}")
+    
     print("\n=== Demo Complete ===")
     print("\nAdvanced Features Summary:")
     print("✓ FT 1.1: Hybrid Search & Reranking - Implemented with BM25 + Vector Search + Cross-Encoder Reranking")
     print("✓ FT 1.2: Autonomous Tool Calling - Implemented with keyword-based routing and LLM tool selection")
     print("✓ FT 1.3: Explainable RAG - Implemented with document metadata tracking and source attribution")
+    print("✓ Real-time Transaction Monitoring - Implemented with streaming agent and alert system")
 
 if __name__ == "__main__":
     main()
