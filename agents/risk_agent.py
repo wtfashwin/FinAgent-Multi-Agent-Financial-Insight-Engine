@@ -3,15 +3,21 @@ Risk Agent: Computes fraud probability using ML models
 """
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.ensemble import RandomForestClassifier, IsolationForest, GradientBoostingClassifier, VotingClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+from sklearn.linear_model import LogisticRegression
 from imblearn.over_sampling import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.pipeline import Pipeline as ImbPipeline
 import joblib
 import logging
 from typing import Dict, Tuple, List, Optional
 from pathlib import Path
+import xgboost as xgb
+from collections import defaultdict
+import shap
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,9 +30,19 @@ class RiskAgent:
         self.model_path = model_path
         self.fraud_model = None
         self.anomaly_model = None
+        self.ensemble_model = None
         self.scaler = None
         self.label_encoders = {}
         self.feature_columns = []
+        self.explainer = None
+        self.model_performance_history = []
+        self.fraud_patterns = {
+            'velocity': 'Unusual transaction frequency',
+            'amount': 'Abnormal transaction amounts',
+            'location': 'Geographically distant transactions',
+            'time': 'Unusual transaction times',
+            'merchant': 'Suspicious merchant categories'
+        }
         
     def prepare_features(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Series]:
         """Prepare features for ML models"""
@@ -69,6 +85,13 @@ class RiskAgent:
             X[f'{col}_dayofweek'] = X[col].dt.dayofweek
             X = X.drop(columns=[col])
         
+        # Feature engineering for fraud detection
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            # Add statistical features
+            X['amount_zscore'] = (X['amount'] - X['amount'].mean()) / X['amount'].std() if 'amount' in X.columns else 0
+            X['amount_ratio_to_mean'] = X['amount'] / X['amount'].mean() if 'amount' in X.columns else 0
+            
         # Encode categorical variables
         categorical_cols = X.select_dtypes(include=['object']).columns
         
@@ -103,8 +126,50 @@ class RiskAgent:
         logger.info(f"Prepared {len(self.feature_columns)} features")
         return X_scaled, y
     
+    def _create_ensemble_model(self):
+        """Create an ensemble of multiple ML models"""
+        # Create individual models
+        rf_model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=10,
+            min_samples_leaf=5,
+            random_state=42,
+            n_jobs=-1,
+            class_weight='balanced'
+        )
+        
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        gb_model = GradientBoostingClassifier(
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.1,
+            random_state=42
+        )
+        
+        # Create voting classifier (ensemble)
+        self.ensemble_model = VotingClassifier(
+            estimators=[
+                ('rf', rf_model),
+                ('xgb', xgb_model),
+                ('gb', gb_model)
+            ],
+            voting='soft'  # Use probability averaging
+        )
+        
+        return self.ensemble_model
+    
     def train_fraud_model(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Dict:
-        """Train fraud detection model"""
+        """Train fraud detection model with ensemble methods"""
         logger.info("Training fraud detection model...")
         
         X, y = self.prepare_features(df, target_col)
@@ -121,25 +186,21 @@ class RiskAgent:
             X, y, test_size=0.2, random_state=42, stratify=y
         )
         
-        # Handle class imbalance with SMOTE
+        # Handle class imbalance with SMOTE and undersampling
         if fraud_rate < 0.1:
-            logger.info("Applying SMOTE for class balancing...")
-            smote = SMOTE(random_state=42)
+            logger.info("Applying SMOTE and undersampling for class balancing...")
+            # Create pipeline for resampling
+            smote = SMOTE(random_state=42, sampling_strategy=0.15)
+            under = RandomUnderSampler(random_state=42, sampling_strategy=0.5)
+            
+            # Apply resampling
             X_train, y_train = smote.fit_resample(X_train, y_train)
-            logger.info(f"After SMOTE - Training samples: {len(X_train)}")
+            X_train, y_train = under.fit_resample(X_train, y_train)
+            logger.info(f"After resampling - Training samples: {len(X_train)}")
         
-        # Train Random Forest
-        logger.info("Training Random Forest classifier...")
-        self.fraud_model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=10,
-            min_samples_leaf=5,
-            random_state=42,
-            n_jobs=-1,
-            class_weight='balanced'
-        )
-        
+        # Train ensemble model
+        logger.info("Training ensemble classifier...")
+        self.fraud_model = self._create_ensemble_model()
         self.fraud_model.fit(X_train, y_train)
         
         # Evaluate
@@ -152,11 +213,24 @@ class RiskAgent:
             'roc_auc': float(roc_auc_score(y_test, y_pred_proba)),
             'classification_report': classification_report(y_test, y_pred, output_dict=True),
             'confusion_matrix': confusion_matrix(y_test, y_pred).tolist(),
-            'feature_importance': dict(zip(
-                self.feature_columns,
-                self.fraud_model.feature_importances_.tolist()
-            ))
         }
+        
+        # Add feature importance if available
+        if hasattr(self.fraud_model, 'named_estimators_'):
+            # For voting classifier, we'll get feature importance from the first estimator
+            first_estimator = list(self.fraud_model.named_estimators_.values())[0]
+            if hasattr(first_estimator, 'feature_importances_'):
+                metrics['feature_importance'] = dict(zip(
+                    self.feature_columns,
+                    first_estimator.feature_importances_.tolist()
+                ))
+        
+        # Store model performance for tracking
+        self.model_performance_history.append({
+            'timestamp': pd.Timestamp.now(),
+            'roc_auc': metrics['roc_auc'],
+            'accuracy': metrics['accuracy']
+        })
         
         logger.info(f"Model trained - ROC AUC: {metrics['roc_auc']:.4f}, Accuracy: {metrics['accuracy']:.4f}")
         
@@ -259,6 +333,95 @@ class RiskAgent:
         
         return result_df
     
+    def get_risk_explanation(self, df: pd.DataFrame, top_n: int = 5) -> Dict:
+        """Provide explainable AI features to understand risk factors using SHAP"""
+        if self.fraud_model is None:
+            raise ValueError("Fraud model not trained. Call train_fraud_model() first.")
+        
+        try:
+            # Prepare data
+            X, _ = self.prepare_features(df.head(100), target_col=None)  # Use subset for explanation
+            
+            # Ensure columns match training
+            missing_cols = set(self.feature_columns) - set(X.columns)
+            for col in missing_cols:
+                X[col] = 0
+            
+            X = X[self.feature_columns]
+            
+            # Initialize SHAP explainer if not already done
+            if self.explainer is None:
+                # Use the first estimator from the ensemble for explanation
+                if hasattr(self.fraud_model, 'named_estimators_'):
+                    first_estimator = list(self.fraud_model.named_estimators_.values())[0]
+                    self.explainer = shap.TreeExplainer(first_estimator)
+                else:
+                    self.explainer = shap.TreeExplainer(self.fraud_model)
+            
+            # Calculate SHAP values
+            shap_values = self.explainer.shap_values(X.head(10))  # Explain first 10 samples
+            
+            # For binary classification, shap_values is a list with 2 elements
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1]  # Take the positive class
+            
+            # Get feature importance
+            feature_importance = np.abs(shap_values).mean(0)
+            feature_names = X.columns
+            
+            # Create explanation
+            explanation = {}
+            feature_importance_dict = dict(zip(feature_names, feature_importance))
+            sorted_features = sorted(feature_importance_dict.items(), key=lambda x: x[1], reverse=True)
+            
+            explanation['top_risk_factors'] = sorted_features[:top_n]
+            explanation['fraud_patterns_detected'] = []
+            
+            # Identify fraud patterns
+            for feature, importance in sorted_features[:top_n]:
+                if importance > 0.1:  # Threshold for significant factors
+                    for pattern_key, pattern_desc in self.fraud_patterns.items():
+                        if pattern_key in feature.lower():
+                            explanation['fraud_patterns_detected'].append({
+                                'pattern': pattern_key,
+                                'description': pattern_desc,
+                                'feature': feature,
+                                'importance': float(importance)
+                            })
+            
+            return explanation
+            
+        except Exception as e:
+            logger.warning(f"Could not generate risk explanation: {e}")
+            return {
+                'top_risk_factors': [],
+                'fraud_patterns_detected': [],
+                'error': str(e)
+            }
+    
+    def update_model_with_new_data(self, df: pd.DataFrame, target_col: Optional[str] = None) -> Dict:
+        """Implement dynamic model updating based on new data"""
+        if self.fraud_model is None:
+            raise ValueError("Fraud model not trained. Call train_fraud_model() first.")
+        
+        logger.info("Updating model with new data...")
+        
+        X, y = self.prepare_features(df, target_col)
+        
+        if y is None:
+            raise ValueError("No target column found. Cannot update supervised model.")
+        
+        # Check class balance in new data
+        fraud_rate = y.mean()
+        logger.info(f"Fraud rate in new data: {fraud_rate:.2%}")
+        
+        # Retrain model with combined data (incremental learning approach)
+        # For simplicity, we'll retrain with new data, but in production this would be more sophisticated
+        metrics = self.train_fraud_model(df, target_col)
+        
+        logger.info("Model updated successfully")
+        return metrics
+    
     def get_risk_summary(self, df: pd.DataFrame) -> Dict:
         """Generate risk assessment summary"""
         summary = {}
@@ -279,6 +442,14 @@ class RiskAgent:
         if 'is_anomaly' in df.columns:
             summary['total_anomalies'] = int(df['is_anomaly'].sum())
             summary['anomaly_percentage'] = float(df['is_anomaly'].mean() * 100)
+        
+        # Add model performance history
+        if self.model_performance_history:
+            latest_performance = self.model_performance_history[-1]
+            summary['model_performance'] = {
+                'roc_auc': latest_performance['roc_auc'],
+                'accuracy': latest_performance['accuracy']
+            }
         
         return summary
     
@@ -301,9 +472,17 @@ class RiskAgent:
         if self.label_encoders:
             joblib.dump(self.label_encoders, output_path / 'label_encoders.pkl')
         
+        if self.explainer:
+            joblib.dump(self.explainer, output_path / 'explainer.pkl')
+        
         # Save feature columns
         with open(output_path / 'feature_columns.txt', 'w') as f:
             f.write('\n'.join(self.feature_columns))
+        
+        # Save performance history
+        if self.model_performance_history:
+            performance_df = pd.DataFrame(self.model_performance_history)
+            performance_df.to_csv(output_path / 'model_performance_history.csv', index=False)
     
     def load_models(self, model_dir: str):
         """Load trained models"""
@@ -323,9 +502,16 @@ class RiskAgent:
         if (model_path / 'label_encoders.pkl').exists():
             self.label_encoders = joblib.load(model_path / 'label_encoders.pkl')
         
+        if (model_path / 'explainer.pkl').exists():
+            self.explainer = joblib.load(model_path / 'explainer.pkl')
+        
         if (model_path / 'feature_columns.txt').exists():
             with open(model_path / 'feature_columns.txt', 'r') as f:
                 self.feature_columns = [line.strip() for line in f.readlines()]
+        
+        if (model_path / 'model_performance_history.csv').exists():
+            performance_df = pd.read_csv(model_path / 'model_performance_history.csv')
+            self.model_performance_history = performance_df.to_dict('records')
 
 
 # Example usage
@@ -353,3 +539,7 @@ if __name__ == "__main__":
     print("\n=== Training Anomaly Detection Model ===")
     anomaly_metrics = agent.train_anomaly_model(sample_df)
     print(f"Anomalies detected: {anomaly_metrics['anomalies_detected']}")
+    
+    print("\n=== Getting Risk Explanation ===")
+    explanation = agent.get_risk_explanation(sample_df)
+    print(f"Top risk factors: {explanation.get('top_risk_factors', [])}")

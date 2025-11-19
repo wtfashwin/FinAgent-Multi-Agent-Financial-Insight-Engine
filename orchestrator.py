@@ -36,6 +36,7 @@ class AgentState(TypedDict):
     data_quality_report: Dict
     visualizations: Dict
     time_series_patterns: Dict
+    risk_explanation: Dict
 
 
 class FinAgentOrchestrator:
@@ -220,6 +221,13 @@ class FinAgentOrchestrator:
                 # Make predictions
                 predictions_df = self.risk_agent.predict_fraud(processed_df)
                 
+                # Get explainable AI features
+                try:
+                    risk_explanation = self.risk_agent.get_risk_explanation(processed_df)
+                    state['risk_explanation'] = risk_explanation
+                except Exception as e:
+                    logger.warning(f"Could not generate risk explanation: {e}")
+                    state['risk_explanation'] = {}
             else:
                 # Use unsupervised anomaly detection
                 logger.info("Training anomaly detection model (no fraud labels)...")
@@ -227,6 +235,7 @@ class FinAgentOrchestrator:
                 
                 # Detect anomalies
                 predictions_df = self.risk_agent.detect_anomalies(processed_df)
+                state['risk_explanation'] = {}
             
             # Generate risk summary
             risk_summary = self.risk_agent.get_risk_summary(predictions_df)
@@ -278,11 +287,31 @@ class FinAgentOrchestrator:
                 if 'total_amount_at_risk' in risk_summary:
                     risk_text += f"  • Amount at Risk: ${risk_summary['total_amount_at_risk']:,.2f}\n"
                 
+                # Add model performance if available
+                if 'model_performance' in risk_summary:
+                    perf = risk_summary['model_performance']
+                    risk_text += f"  • Model Performance: ROC AUC {perf['roc_auc']:.3f}, Accuracy {perf['accuracy']:.3f}\n"
+                
                 summary_parts.append(risk_text)
+            
+            # Add risk explanation if available
+            if state.get('risk_explanation') and state['risk_explanation'].get('top_risk_factors'):
+                explanation = state['risk_explanation']
+                explanation_text = "\n Risk Factors Explanation:\n"
+                
+                for i, (feature, importance) in enumerate(explanation['top_risk_factors'][:3], 1):
+                    explanation_text += f"  {i}. {feature}: {importance:.3f}\n"
+                
+                if explanation.get('fraud_patterns_detected'):
+                    explanation_text += "\n Detected Fraud Patterns:\n"
+                    for pattern in explanation['fraud_patterns_detected']:
+                        explanation_text += f"  • {pattern['description']} (importance: {pattern['importance']:.3f})\n"
+                
+                summary_parts.append(explanation_text)
             
             # Add anomalies
             if state.get('anomalies'):
-                anomaly_text = f"\n⚠️  Anomalies Detected: {len(state['anomalies'])} unusual transactions\n"
+                anomaly_text = f"\n Anomalies Detected: {len(state['anomalies'])} unusual transactions\n"
                 summary_parts.append(anomaly_text)
             
             # Add data quality information
