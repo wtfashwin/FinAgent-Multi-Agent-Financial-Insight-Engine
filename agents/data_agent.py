@@ -9,8 +9,20 @@ from langchain_core.documents import Document
 import logging
 from io import BytesIO
 import base64
-import matplotlib.pyplot as plt
-import seaborn as sns
+
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    plt = None
+
+try:
+    import seaborn as sns
+    SEABORN_AVAILABLE = True
+except ImportError:
+    SEABORN_AVAILABLE = False
+    sns = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

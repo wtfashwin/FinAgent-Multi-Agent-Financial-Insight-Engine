@@ -160,7 +160,8 @@ class InsightAgent:
         
         logger.info("Initializing embeddings...")
         try:
-            self.embeddings = None
+            self.embeddings = HuggingFaceEmbeddings(model_name=self.config.EMBEDDING_MODEL)
+            logger.info("✓ Embeddings initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing embeddings: {e}")
             self.embeddings = None

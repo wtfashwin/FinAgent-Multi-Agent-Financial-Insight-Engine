@@ -137,19 +137,6 @@ class VisualizationRequest(BaseModel):
     chart_types: Optional[List[str]] = None
     filters: Optional[Dict] = None
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize agents on startup"""
-    global orchestrator, collaboration_agent, ml_enhancement_agent
-    
-    logger.info(" Starting FinAgent API...")
-    orchestrator = FinAgentOrchestrator(config=Config)
-    orchestrator.compile()
-    collaboration_agent = CollaborationAgent()  # Initialize collaboration agent
-    ml_enhancement_agent = MLEnhancementAgent()  # Initialize ML enhancement agent
-    logger.info("✓ FinAgent initialized successfully")
-
-
 @app.get("/")
 async def root():
     """Root endpoint"""
